@@ -1,0 +1,57 @@
+{
+  "kind": "collectionType",
+  "collectionName": "addresses",
+  "info": {
+    "singularName": "address",
+    "pluralName": "addresses",
+    "displayName": "Address",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "street": {
+      "type": "string",
+      "required": true
+    },
+    "street_number": {
+      "type": "string",
+      "required": true
+    },
+    "apartment_number": {
+      "type": "string"
+    },
+    "neighborhood": {
+      "type": "string",
+      "required": true
+    },
+    "state": {
+      "type": "string",
+      "required": true
+    },
+    "city": {
+      "type": "string",
+      "required": true
+    },
+    "country": {
+      "type": "string",
+      "required": false,
+      "default": "México"
+    },
+    "postal_code": {
+      "type": "string",
+      "required": true
+    },
+    "phone": {
+      "type": "string",
+      "required": true
+    },
+    "is_main": {
+      "type": "boolean",
+      "default": false,
+      "required": true
+    }
+  }
+}

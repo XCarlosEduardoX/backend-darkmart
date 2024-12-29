@@ -1,0 +1,34 @@
+{
+  "kind": "collectionType",
+  "collectionName": "payment_intents",
+  "info": {
+    "singularName": "payment-intent",
+    "pluralName": "payment-intents",
+    "displayName": "PaymentIntent",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "paymentintent_id": {
+      "type": "string"
+    },
+    "amount": {
+      "type": "decimal"
+    },
+    "pi_status": {
+      "type": "string"
+    },
+    "payment_link": {
+      "type": "text"
+    },
+    "payment_method": {
+      "type": "string"
+    },
+    "payment_status": {
+      "type": "string"
+    }
+  }
+}

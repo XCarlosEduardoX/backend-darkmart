@@ -1,0 +1,43 @@
+{
+  "kind": "collectionType",
+  "collectionName": "variations",
+  "info": {
+    "singularName": "variation",
+    "pluralName": "variations",
+    "displayName": "Variations",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "price": {
+      "type": "decimal"
+    },
+    "discount": {
+      "type": "decimal"
+    },
+    "size": {
+      "type": "string"
+    },
+    "stock": {
+      "type": "integer"
+    },
+    "product": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::product.product",
+      "inversedBy": "variations"
+    },
+    "slug": {
+      "type": "uid",
+      "targetField": "size"
+    },
+    "active": {
+      "type": "boolean",
+      "default": true,
+      "required": true
+    }
+  }
+}

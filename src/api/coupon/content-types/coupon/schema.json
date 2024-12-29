@@ -1,0 +1,40 @@
+{
+  "kind": "collectionType",
+  "collectionName": "coupons",
+  "info": {
+    "singularName": "coupon",
+    "pluralName": "coupons",
+    "displayName": "Coupons",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "code": {
+      "type": "string",
+      "required": true,
+      "maxLength": 10
+    },
+    "discount": {
+      "type": "decimal"
+    },
+    "valid_until": {
+      "type": "datetime"
+    },
+    "is_active": {
+      "type": "boolean",
+      "default": false
+    },
+    "users": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "plugin::users-permissions.user",
+      "mappedBy": "coupon"
+    },
+    "rules": {
+      "type": "json"
+    }
+  }
+}
