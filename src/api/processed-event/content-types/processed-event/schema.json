@@ -1,0 +1,23 @@
+{
+  "kind": "collectionType",
+  "collectionName": "processed_events",
+  "info": {
+    "singularName": "processed-event",
+    "pluralName": "processed-events",
+    "displayName": "ProcessedEvent",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "id_event": {
+      "type": "string",
+      "unique": true
+    },
+    "event_created_at": {
+      "type": "datetime"
+    }
+  }
+}

@@ -6,8 +6,13 @@ const { v4: uuidv4 } = require('uuid');
 const { createCoreController } = require('@strapi/strapi').factories;
 
 
-const eventsBuffer = []; // Buffer temporal para almacenar eventos desordenados
-const processedEvents = new Set(); // Almacenar los IDs de eventos ya procesados
+const retryQueue = [];
+const MAX_RETRIES = 3; // Número máximo de reintentos
+const RETRY_DELAY = 5000; // Tiempo en milisegundos entre reintentos
+
+
+
+
 module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
     async createFreeOrder(ctx) {
@@ -78,18 +83,32 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     console.error('Error al actualizar el cupón:', error);
                 }
             }
+
+            //actualizar user
+            // try {
+            //     await strapi.entityService.update('api::user.user', user.id, {
+            //         data: { promo_first_purchase_used: true },
+            //     });
+            // }
+            // catch (error) {
+            //     console.error('Error al actualizar el usuario:', error);
+            //     return { error: 'Error al actualizar el usuario' };
+            // }
+
+
             // Enviar email de confirmación
             if (user?.email) {
                 try {
                     await strapi.plugins['email'].services.email.send({
                         to: user.email,
                         from: "mrlocked4@gmail.com",
-                        subject: 'Compra Darkmart recibida',
+                        subject: 'Compra Everblack recibida',
                         text: `Hola ${user.username}, tu compra se ha recibido con éxito.`,
                     });
                     console.log('Email enviado con éxito');
                 } catch (emailError) {
                     console.error("Error al enviar el email: ", emailError);
+                    return { error: 'error al enviar el email ', emailError };
                 }
             }
 
@@ -246,6 +265,14 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
             });
 
+            //actualizar user
+            // await strapi.service('api::user.user').update(user.id, {
+            //     data: {
+            //         promo_first_purchase_used: true
+            //     },
+
+            // })
+
             return { stripeSession: session, order };
         } catch (e) {
             console.error(e);
@@ -305,42 +332,54 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             event = stripe.webhooks.constructEvent(rawBody, signature, endpointSecret);
         } catch (err) {
             console.error('Error verificando la firma del webhook:', err.message);
-            ctx.response.status = 400;
-            return ctx.send({ error: 'Verificación de firma fallida del webhook' });
+            ctx.status = 400;
+            ctx.body = { error: 'Verificación de firma fallida del webhook' };
+            return;
         }
 
-        // Verifica si el evento ya ha sido procesado
-        if (processedEvents.has(event.id)) {
+        // Verifica si el evento ya ha sido procesado en la colección de Strapi
+        const existingEvent = await strapi.entityService.findMany('api::processed-event.processed-event', {
+            filters: { id_event: event.id }
+        });
+
+        if (existingEvent.length > 0) {
             console.log(`Evento ya procesado: ${event.id}`);
-            ctx.response.status = 200;
+            ctx.status = 200;
             ctx.body = { received: true };
             return;
         }
 
-        // Agregar el evento al buffer y ordenar
-        eventsBuffer.push(event);
-        eventsBuffer.sort((a, b) => a.created - b.created);
+        // Procesa el evento
+        try {
+            console.log(`Procesando evento: ${event.id} (${event.type})`);
 
-        // Procesar eventos en orden
-        while (eventsBuffer.length > 0) {
-            const currentEvent = eventsBuffer[0]; // Tomar el primer evento
-
-            // Verificar si hay dependencias no resueltas
-            if (hasUnresolvedDependencies(currentEvent)) {
-                console.log(`Esperando dependencias para el evento: ${currentEvent.id}`);
-                break; // Esperar a que llegue el evento dependiente
+            switch (event.type) {
+                case 'payment_intent.succeeded':
+                    // Lógica para pagos exitosos
+                    console.log('Pago exitoso:', event.data.object);
+                    break;
+                case 'payment_intent.failed':
+                    // Lógica para pagos fallidos
+                    console.log('Pago fallido:', event.data.object);
+                    break;
+                default:
+                    console.log(`Evento no manejado: ${event.type}`);
             }
 
-            // Procesar el evento y eliminarlo del buffer
-            eventsBuffer.shift();
-            await processEvent(currentEvent);
-            processedEvents.add(currentEvent.id);
+            // Marca el evento como procesado en Strapi
+            await strapi.entityService.create('api::processed-event.processed-event', {
+                data: {
+                    event_id: event.id,
+                    event_created_at: new Date(),
+                },
+            });
+        } catch (err) {
+            console.error(`Error procesando el evento ${event.id}:`, err.message);
         }
 
-        ctx.response.status = 200;
+        ctx.status = 200;
         ctx.body = { received: true };
-    }
-
+    },
 
 
 
@@ -674,7 +713,25 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
     // },
 }));
 
+async function retryFailedEvents() {
+    while (retryQueue.length > 0) {
+        const { event, retries } = retryQueue.shift();
 
+        if (retries > MAX_RETRIES) {
+            console.error(`Evento ${event.id} falló después de ${retries} intentos.`);
+            continue; // O puedes guardar este evento en un log para revisión manual.
+        }
+
+        console.log(`Reintentando evento ${event.id}, intento ${retries + 1}`);
+        try {
+            await processEvent(event);
+        } catch (err) {
+            console.error(`Error en el reintento del evento ${event.id}:`, err.message);
+            retryQueue.push({ event, retries: retries + 1 });
+            setTimeout(() => retryFailedEvents(), RETRY_DELAY); // Reprogramar reintento
+        }
+    }
+}
 async function fulfillCheckout(sessionId) {
     // Set your secret key. Remember to switch to your live secret key in production.
     // See your keys here: https://dashboard.stripe.com/apikeys
@@ -707,14 +764,15 @@ async function fulfillCheckout(sessionId) {
                 await strapi.entityService.update('api::order.order', orderId, {
                     data: {
                         shipping_status: 'pending',
-                        status_order: 'completed',
+                        order_status: 'completed',
                         payment_intent: payment_intent_id,
+
                     },
                 });
             } catch (error) {
                 console.error('Error al actualizar el pedido:', error);
                 await strapi.entityService.update('api::order.order', orderId, {
-                    data: { status_order: 'failed' },
+                    data: { order_status: 'failed' },
                 });
             }
 
@@ -733,12 +791,12 @@ async function fulfillCheckout(sessionId) {
                 const payment_method = paymentIntents[0].payment_method;
                 console.log('paymentIntents ', paymentIntents[0])
                 if (payment_method == 'oxxo') {
-                    let mainMessage = "¡Compra Darkmart recibida! Tu pago se acreditó con éxito"
+                    let mainMessage = "¡Compra Everblack recibida! Tu pago se acreditó con éxito"
                     //enviar correo de confirmacion
                     sendEmail(name, email, strapi, products, mainMessage)
 
                 } else if (payment_method == 'card') {
-                    let mainMessage = "¡Compra Darkmart recibida!"
+                    let mainMessage = "¡Compra Everblack recibida!"
                     sendEmail(name, email, strapi, products, mainMessage)
                 }
             }
@@ -768,7 +826,12 @@ async function updateStockProducts(products) {
 
                 //bajar stock de la variante
                 await strapi.entityService.update('api::variation.variation', variantData.id, {
-                    data: { stock: variantData.stock - stockSelected },
+                    data: {
+                        stock: variantData.stock - stockSelected,
+                        units_sold: variantData.units_sold + stockSelected,
+
+
+                    },
                 });
             } else {
                 const [productData] = await strapi.entityService.findMany('api::product.product', {
@@ -779,7 +842,12 @@ async function updateStockProducts(products) {
                 //bajar stock del producto
                 if (productData) {
                     await strapi.entityService.update('api::product.product', productData.id, {
-                        data: { stock: productData.stock - stockSelected },
+                        data: {
+                            stock: productData.stock - stockSelected,
+                            units_sold: productData.units_sold + stockSelected,
+
+
+                        },
                     });
                 }
             }
@@ -831,8 +899,8 @@ function hasUnresolvedDependencies(event) {
     // que necesites para verificar si hay dependencias sin resolver.
     // Por ejemplo, si el evento es de tipo 'payment_intent.created', puedes
     // verificar si hay dependencias sin resolver relacionadas con pagos.
-    
-    
+
+
     return false;
 }
 
@@ -899,8 +967,8 @@ async function processEvent(event) {
                 filters: { paymentintent_id: paymentData.id },
             });
             if (paymentIntents.length > 0) {
-                
-             }
+
+            }
             else {
                 // await strapi.entityService.create('api::payment-intent.payment-intent', {
                 //     data: {

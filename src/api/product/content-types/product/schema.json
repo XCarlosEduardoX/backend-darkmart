@@ -123,6 +123,16 @@
           "localized": true
         }
       }
+    },
+    "units_sold": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "integer",
+      "required": true,
+      "default": 0
     }
   }
 }

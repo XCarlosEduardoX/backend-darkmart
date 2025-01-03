@@ -29,6 +29,9 @@
     },
     "payment_status": {
       "type": "string"
+    },
+    "payment_details": {
+      "type": "json"
     }
   }
 }

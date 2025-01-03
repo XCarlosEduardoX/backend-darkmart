@@ -52,6 +52,10 @@
     },
     "order_status": {
       "type": "string"
+    },
+    "refund_requested": {
+      "type": "boolean",
+      "default": false
     }
   }
 }

@@ -596,6 +596,8 @@ export interface ApiOrderOrder extends Struct.CollectionTypeSchema {
     >;
     products: Schema.Attribute.JSON;
     publishedAt: Schema.Attribute.DateTime;
+    refund_requested: Schema.Attribute.Boolean &
+      Schema.Attribute.DefaultTo<false>;
     shipping_status: Schema.Attribute.String &
       Schema.Attribute.Required &
       Schema.Attribute.DefaultTo<'pending'>;
@@ -636,11 +638,43 @@ export interface ApiPaymentIntentPaymentIntent
       'api::payment-intent.payment-intent'
     > &
       Schema.Attribute.Private;
+    payment_details: Schema.Attribute.JSON;
     payment_link: Schema.Attribute.Text;
     payment_method: Schema.Attribute.String;
     payment_status: Schema.Attribute.String;
     paymentintent_id: Schema.Attribute.String;
     pi_status: Schema.Attribute.String;
+    publishedAt: Schema.Attribute.DateTime;
+    updatedAt: Schema.Attribute.DateTime;
+    updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
+      Schema.Attribute.Private;
+  };
+}
+
+export interface ApiProcessedEventProcessedEvent
+  extends Struct.CollectionTypeSchema {
+  collectionName: 'processed_events';
+  info: {
+    description: '';
+    displayName: 'ProcessedEvent';
+    pluralName: 'processed-events';
+    singularName: 'processed-event';
+  };
+  options: {
+    draftAndPublish: true;
+  };
+  attributes: {
+    createdAt: Schema.Attribute.DateTime;
+    createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
+      Schema.Attribute.Private;
+    event_created_at: Schema.Attribute.DateTime;
+    id_event: Schema.Attribute.String & Schema.Attribute.Unique;
+    locale: Schema.Attribute.String & Schema.Attribute.Private;
+    localizations: Schema.Attribute.Relation<
+      'oneToMany',
+      'api::processed-event.processed-event'
+    > &
+      Schema.Attribute.Private;
     publishedAt: Schema.Attribute.DateTime;
     updatedAt: Schema.Attribute.DateTime;
     updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
@@ -740,6 +774,14 @@ export interface ApiProductProduct extends Struct.CollectionTypeSchema {
           localized: true;
         };
       }>;
+    units_sold: Schema.Attribute.Integer &
+      Schema.Attribute.Required &
+      Schema.Attribute.SetPluginOptions<{
+        i18n: {
+          localized: true;
+        };
+      }> &
+      Schema.Attribute.DefaultTo<0>;
     updatedAt: Schema.Attribute.DateTime;
     updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
@@ -781,6 +823,7 @@ export interface ApiVariationVariation extends Struct.CollectionTypeSchema {
     size: Schema.Attribute.String;
     slug: Schema.Attribute.UID<'size'>;
     stock: Schema.Attribute.Integer;
+    units_sold: Schema.Attribute.Integer;
     updatedAt: Schema.Attribute.DateTime;
     updatedBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
@@ -1272,6 +1315,9 @@ export interface PluginUsersPermissionsUser
       Schema.Attribute.SetMinMaxLength<{
         minLength: 6;
       }>;
+    promo_first_purchase_used: Schema.Attribute.Boolean &
+      Schema.Attribute.Required &
+      Schema.Attribute.DefaultTo<false>;
     provider: Schema.Attribute.String;
     publishedAt: Schema.Attribute.DateTime;
     resetPasswordToken: Schema.Attribute.String & Schema.Attribute.Private;
@@ -1308,6 +1354,7 @@ declare module '@strapi/strapi' {
       'api::offer.offer': ApiOfferOffer;
       'api::order.order': ApiOrderOrder;
       'api::payment-intent.payment-intent': ApiPaymentIntentPaymentIntent;
+      'api::processed-event.processed-event': ApiProcessedEventProcessedEvent;
       'api::product.product': ApiProductProduct;
       'api::variation.variation': ApiVariationVariation;
       'plugin::content-releases.release': PluginContentReleasesRelease;
