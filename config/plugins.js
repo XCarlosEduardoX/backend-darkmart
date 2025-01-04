@@ -12,9 +12,7 @@ module.exports = ({ env }) => ({
       },
     },
   },
-  'magictm-deep-populate': {
-    enabled: true,
-  },
+ 
   // "image-optimizer": {
   //   enabled: true,
   //   config: {

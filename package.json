@@ -12,11 +12,10 @@
     "reset": "strapi develop --reset"
   },
   "dependencies": {
-    "@magictm/strapi-plugin-deep-populate": "^1.1.0",
-    "@strapi/plugin-cloud": "5.5.1",
-    "@strapi/plugin-users-permissions": "5.5.1",
-    "@strapi/provider-email-sendgrid": "^5.5.1",
-    "@strapi/strapi": "5.5.1",
+    "@strapi/plugin-cloud": "5.6.0",
+    "@strapi/plugin-users-permissions": "5.6.0",
+    "@strapi/provider-email-sendgrid": "^5.6.0",
+    "@strapi/strapi": "5.6.0",
     "pg": "8.8.0",
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
