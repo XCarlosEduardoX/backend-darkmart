@@ -1,4 +1,0 @@
-[phases.install]
-
-cmds = ['npm ci --force']
-
