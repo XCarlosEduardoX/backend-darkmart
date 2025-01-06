@@ -74,7 +74,8 @@
     "addresses": {
       "type": "relation",
       "relation": "oneToMany",
-      "target": "api::address.address"
+      "target": "api::address.address",
+      "mappedBy": "user"
     },
     "orders": {
       "type": "relation",

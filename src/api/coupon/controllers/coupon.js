@@ -18,7 +18,7 @@ module.exports = {
         }
 
 
-        const rules = coupon.rules;
+        const rules = typeof coupon.rules === 'string' ? JSON.parse(coupon.rules) : coupon.rules;
 
         console.log('rules', rules)
         console.log('summary', summary)
@@ -45,7 +45,7 @@ module.exports = {
             }
         }
         //si total_items es  0, entonces no hay limite de items
-        if (rules.total_items && (summary.totalItems > rules.total_items)) {
+        if (rules.totalItems && (summary.totalItems > rules.total_items)) {
             return ctx.badRequest('El máximo de items para este cupón es de ' + rules.total_items);
         }
         return ctx.send({ success: true, data: coupon });
