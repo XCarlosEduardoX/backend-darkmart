@@ -329,6 +329,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
         let event;
         try {
+            console.log('Verificando la firma del webhook...');
             event = stripe.webhooks.constructEvent(rawBody, signature, endpointSecret);
         } catch (err) {
             console.error('Error verificando la firma del webhook:', err.message);
@@ -352,19 +353,19 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
         // Procesa el evento
         try {
             console.log(`Procesando evento: ${event.id} (${event.type})`);
-
-            switch (event.type) {
-                case 'payment_intent.succeeded':
-                    // Lógica para pagos exitosos
-                    console.log('Pago exitoso:', event.data.object);
-                    break;
-                case 'payment_intent.failed':
-                    // Lógica para pagos fallidos
-                    console.log('Pago fallido:', event.data.object);
-                    break;
-                default:
-                    console.log(`Evento no manejado: ${event.type}`);
-            }
+            processEvent(event);
+            // switch (event.type) {
+            //     case 'payment_intent.succeeded':
+            //         // Lógica para pagos exitosos
+            //         console.log('Pago exitoso:', event.data.object);
+            //         break;
+            //     case 'payment_intent.failed':
+            //         // Lógica para pagos fallidos
+            //         console.log('Pago fallido:', event.data.object);
+            //         break;
+            //     default:
+            //         console.log(`Evento no manejado: ${event.type}`);
+            // }
 
             // Marca el evento como procesado en Strapi
             await strapi.entityService.create('api::processed-event.processed-event', {
@@ -737,25 +738,19 @@ async function fulfillCheckout(sessionId) {
     // See your keys here: https://dashboard.stripe.com/apikeys
     const stripe = require('stripe')(process.env.STRIPE_KEY);
 
-    // TODO: Make this function safe to run multiple times,
-    // even concurrently, with the same session ID
-
-    // TODO: Make sure fulfillment hasn't already been
-    // peformed for this Checkout Session
-
     // Retrieve the Checkout Session from the API with line_items expanded
     const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId, {
         expand: ['line_items'],
     });
-
-    console.log('checkoutSession', checkoutSession);
+    console.log("checkoutSession ", checkoutSession);
     const stripe_id = checkoutSession.id;
     const payment_intent_id = checkoutSession.payment_intent;
     const orders = await strapi.entityService.findMany('api::order.order', {
         filters: { stripe_id },
     });
+
     // Check the Checkout Session's payment_status property
-    // to determine if fulfillment should be peformed
+    // to determine if fulfillment should be performed
     if (checkoutSession.payment_status === 'paid') {
         if (orders.length > 0) {
             const orderId = orders[0].id;
@@ -766,7 +761,6 @@ async function fulfillCheckout(sessionId) {
                         shipping_status: 'pending',
                         order_status: 'completed',
                         payment_intent: payment_intent_id,
-
                     },
                 });
             } catch (error) {
@@ -776,39 +770,65 @@ async function fulfillCheckout(sessionId) {
                 });
             }
 
-
-            const products = orders[0].products
-            updateStockProducts(products)
+            const products = orders[0].products;
+            updateStockProducts(products);
 
             const { name, email } = checkoutSession.customer_details;
 
-            //obtener los datos del payment intent
+            // Obtener los datos del payment intent
             const paymentIntents = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
                 filters: { paymentintent_id: payment_intent_id },
             });
 
             if (paymentIntents.length > 0) {
                 const payment_method = paymentIntents[0].payment_method;
-                console.log('paymentIntents ', paymentIntents[0])
-                if (payment_method == 'oxxo') {
-                    let mainMessage = "¡Compra Everblack recibida! Tu pago se acreditó con éxito"
-                    //enviar correo de confirmacion
-                    sendEmail(name, email, strapi, products, mainMessage)
+                console.log('paymentIntents ', paymentIntents[0]);
 
-                } else if (payment_method == 'card') {
-                    let mainMessage = "¡Compra Everblack recibida!"
-                    sendEmail(name, email, strapi, products, mainMessage)
+                let mainMessage = "¡Compra EverBlack recibida!";
+
+                // Enviar correo de confirmación dependiendo del método de pago
+                if (payment_method == 'oxxo') {
+                    mainMessage = "¡Compra EverBlack recibida! Tu pago se acreditó con éxito";
+                }
+
+                sendEmail(name, email, strapi, products, mainMessage);
+
+                // Obtener la factura asociada con el payment_intent
+                try {
+                    const invoice = await stripe.invoices.retrieve(checkoutSession.invoice);
+                    const invoiceUrl = invoice.hosted_invoice_url;  // URL de la factura
+
+                    console.log('Factura disponible en: ', invoiceUrl);
+
+                    // Aquí puedes agregar lógica para enviar un correo con la URL de la factura
+                    sendInvoiceEmail(name, email, invoiceUrl);
+
+                } catch (error) {
+                    console.error('Error al obtener la factura:', error);
                 }
             }
         }
     }
-    // if (checkoutSession.payment_status !== 'unpaid') {
-    //     // TODO: Perform fulfillment of the line items
-
-    //     // TODO: Record/save fulfillment status for this
-    //     // Checkout Session
-    // }
 }
+
+// Función para enviar el correo con la URL de la factura
+function sendInvoiceEmail(name, email, invoiceUrl) {
+    const message = `
+        Hola ${name},
+
+        Tu pago ha sido procesado con éxito. Puedes ver y descargar tu factura usando el siguiente enlace:
+
+        ${invoiceUrl}
+
+        ¡Gracias por tu compra!
+
+        El equipo de Everblack
+    `;
+
+    // Aquí deberías implementar el envío de correo, dependiendo de tu servicio de correo
+    sendEmail(name, email, strapi, [], message);
+}
+
 async function updateStockProducts(products) {
     for (const product of products) {
         try {
@@ -859,14 +879,9 @@ async function updateStockProducts(products) {
 
 }
 
-/**
- * @param {any} name
- * @param {any} email
- * @param {import("@strapi/types/dist/core").Strapi} strapi
- * @param {any} products
- * @param {string} mainMessage
- */
+
 async function sendEmail(name, email, strapi, products, mainMessage) {
+    console.log("sending email");
     try {
         await strapi.plugins['email'].services.email.send({
             to: email,
@@ -992,26 +1007,26 @@ async function processEvent(event) {
         }
 
         //The customer has successfully submitted the Checkout form pero aun no ha pagado
-        case 'checkout.session.completed': {
-            const paymentData = event.data.object;
-            const payment_intent_id = paymentData.payment_intent
-            const payment_link = paymentData.url
-            const payment_status = paymentData.payment_status
-            const pi_status = paymentData.status
-            const paymentIntents = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
-                filters: { paymentintent_id: payment_intent_id },
-            });
-            if (paymentIntents.length > 0) {
-                const pi_id = paymentIntents[0].id
-                await strapi.entityService.update('api::payment-intent.payment-intent', pi_id, {
-                    data: { payment_link: payment_link, payment_status: payment_status, pi_status: pi_status },
-                });
-            } else {
-                console.log('no se encontro el payment intent');
+        // case 'checkout.session.completed': {
+        //     const paymentData = event.data.object;
+        //     const payment_intent_id = paymentData.payment_intent
+        //     const payment_link = paymentData.url
+        //     const payment_status = paymentData.payment_status
+        //     const pi_status = paymentData.status
+        //     const paymentIntents = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
+        //         filters: { paymentintent_id: payment_intent_id },
+        //     });
+        //     if (paymentIntents.length > 0) {
+        //         const pi_id = paymentIntents[0].id
+        //         await strapi.entityService.update('api::payment-intent.payment-intent', pi_id, {
+        //             data: { payment_link: payment_link, payment_status: payment_status, pi_status: pi_status },
+        //         });
+        //     } else {
+        //         console.log('no se encontro el payment intent');
 
-            }
-            break;
-        }
+        //     }
+        //     break;
+        // }
 
         //pago oxxo hecho con exito
         case 'checkout.session.async_payment_succeeded': {

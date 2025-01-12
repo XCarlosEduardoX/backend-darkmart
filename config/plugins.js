@@ -2,15 +2,25 @@ module.exports = ({ env }) => ({
   // ...
   email: {
     config: {
-      provider: 'sendgrid',
+      provider: 'strapi-provider-email-resend',
       providerOptions: {
-        apiKey: env('SENDGRID_API_KEY'),
+        apiKey: env('RESEND_API_KEY'), // Required
       },
       settings: {
-        defaultFrom: 'mrlcoked4@gmail.com',
-        defaultReplyTo: 'mrlcoked4@gmail.com',
+        defaultFrom: 'mrlocked4@gmail.com',
+        defaultReplyTo: 'mrlocked4@gmail.com',
       },
-    },
+    }
+    // config: {
+    //   provider: 'sendgrid',
+    //   providerOptions: {
+    //     apiKey: env('SENDGRID_API_KEY'),
+    //   },
+    //   settings: {
+    //     defaultFrom: 'mrlcoked4@gmail.com',
+    //     defaultReplyTo: 'mrlcoked4@gmail.com',
+    //   },
+    // },
   },
   upload: {
     config: {
