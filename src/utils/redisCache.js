@@ -1,14 +1,9 @@
-const Redis = require('ioredis').default || require('ioredis');
+const Redis = require('ioredis');
 
+// Conexión a Redis con búsqueda dual (IPv4 e IPv6)
 const redis = new Redis(process.env.REDIS_URL + '?family=0');
 
-// const redis = new Redis({
-//     host: process.env.REDISHOST || '127.0.0.1',
-//     port: process.env.REDISPORT || 6379,
-//     password: process.env.REDISPASSWORD || null,
-//     db: process.env.REDISDB || 0,
-// });
-
+// Funciones de caché
 const cache = {
     async get(key) {
         const data = await redis.get(key);

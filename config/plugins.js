@@ -37,27 +37,7 @@ module.exports = ({ env }) => ({
       },
     },
   },
-  redis: {
-    config: {
-      settings: {
-        debug: false,
-        enableRedlock: true,
-      },
-      connections: {
-        default: {
-          connection: {
-            host: env('REDISHOST', '127.0.0.1'),
-            port: env.int('REDISPORT', 6379),
-            db: env.int('REDISDB', 0),
-            password: env('REDISPASSWORD', null),
-          },
-          settings: {
-            debug: false,
-          },
-        },
-      },
-    },
-  },
+
   // Step 2: Configure the redis cache plugin
   // "rest-cache": {
   //   config: {
