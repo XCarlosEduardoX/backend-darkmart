@@ -1,16 +1,21 @@
 module.exports = {
     async applyCoupon(ctx) {
         const { couponCode, user, summary } = ctx.request.body;
-        let totalPurchase = summary.totalPriceProducts;
+        //covertir a string couponcode
+        let couponCodeString = couponCode.toString().toUpperCase();
 
+
+        let totalPurchase = summary.totalPriceProducts;
         const userData = await strapi.entityService.findOne('plugin::users-permissions.user', user.id, {
             populate: { orders: true },
         });
-        if (!couponCode) {
+        if (!couponCodeString) {
             return ctx.badRequest('El código del cupón es requerido');
         }
         // Buscar cupón
-        const coupon = await findCouponByCode(couponCode)
+        const coupon = await findCouponByCode(couponCodeString)
+
+        console.log(coupon)
         if (!coupon) {
             return ctx.badRequest('Cupón inválido o inactivo');
         }
@@ -18,42 +23,50 @@ module.exports = {
             return ctx.badRequest('El cupón ha expirado');
         }
 
+        if (coupon.allowed_users.length > 0) {
+            //buscar si el usuario esta en la lista de usuarios permitidos
+            const allowedUsers = coupon.allowed_users.find((allowedUser) => allowedUser.id === user.id);
+            if (!allowedUsers) {
+                return ctx.badRequest('El cupón no está permitido para este usuario');
+            }
+        }
 
         const rules = typeof coupon.rules === 'string' ? JSON.parse(coupon.rules) : coupon.rules;
+        // 2. Validar reglas 
+        if (rules) {
 
 
-        // 2. Validar reglas para usuarios logueados
-
-        if (rules.new_user && userData.orders.length > 0) {
-            return ctx.badRequest('El cupón es solo para nuevos usuarios');
-        }
-
-        // Verificar si el usuario ya ha usado el cupón
-        const hasUsedCoupon = await userHasUsedCoupon(user.id, coupon.id);
-        if (hasUsedCoupon) {
-            return ctx.badRequest('Ya has utilizado este cupón');
-        }
-
-
-
-        if (rules.min_purchase > 0) {
-            if (totalPurchase < rules.min_purchase) {
-                return ctx.badRequest('El mínimo de compra es de $' + (rules.min_purchase)/100 +' MXN');
+            if (rules.new_user && userData.orders.length > 0) {
+                return ctx.badRequest('El cupón es solo para nuevos usuarios');
             }
-        }
-        //si max_purchase es  0, entonces no hay limite de compra
-        if (rules.max_purchase > 0) {
-            if (totalPurchase > rules.max_purchase) {
-                return ctx.badRequest('El máximo de compra para este cupón es de $' + (rules.max_purchase)/100+' MXN');
+
+            // Verificar si el usuario ya ha usado el cupón
+            const hasUsedCoupon = await userHasUsedCoupon(user.id, coupon.id);
+            if (hasUsedCoupon) {
+                return ctx.badRequest('Ya has utilizado este cupón');
             }
-        }
 
-        //si total_items es  0, entonces no hay limite de items
-        if (rules.total_items > 0) {
-            console.log('total items', summary.totalItems);
-            if (summary.totalItems > rules.total_items) {
 
-                return ctx.badRequest('El máximo de items para este cupón es de ' + rules.total_items);
+
+            if (rules.min_purchase > 0) {
+                if (totalPurchase < rules.min_purchase) {
+                    return ctx.badRequest('El mínimo de compra es de $' + (rules.min_purchase) / 100 + ' MXN');
+                }
+            }
+            //si max_purchase es  0, entonces no hay limite de compra
+            if (rules.max_purchase > 0) {
+                if (totalPurchase > rules.max_purchase) {
+                    return ctx.badRequest('El máximo de compra para este cupón es de $' + (rules.max_purchase) / 100 + ' MXN');
+                }
+            }
+
+            //si total_items es  0, entonces no hay limite de items
+            if (rules.total_items > 0) {
+                console.log('total items', summary.totalItems);
+                if (summary.totalItems > rules.total_items) {
+
+                    return ctx.badRequest('El máximo de items para este cupón es de ' + rules.total_items);
+                }
             }
         }
         return ctx.send({ success: true, data: coupon });
@@ -137,6 +150,7 @@ async function userHasUsedCoupon(userId, couponId) {
 async function findCouponByCode(code) {
     const [coupon] = await strapi.entityService.findMany('api::coupon.coupon', {
         filters: { code },
+        populate: { 'allowed_users': true },
         limit: 1,
     });
     return coupon;

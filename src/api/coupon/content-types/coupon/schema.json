@@ -35,6 +35,11 @@
     },
     "rules": {
       "type": "json"
+    },
+    "allowed_users": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "plugin::users-permissions.user"
     }
   }
 }

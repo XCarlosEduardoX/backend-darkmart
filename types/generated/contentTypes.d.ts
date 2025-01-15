@@ -507,6 +507,10 @@ export interface ApiCouponCoupon extends Struct.CollectionTypeSchema {
     draftAndPublish: false;
   };
   attributes: {
+    allowed_users: Schema.Attribute.Relation<
+      'oneToMany',
+      'plugin::users-permissions.user'
+    >;
     code: Schema.Attribute.String &
       Schema.Attribute.Required &
       Schema.Attribute.SetMinMaxLength<{
