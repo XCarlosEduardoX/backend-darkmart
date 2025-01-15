@@ -44,11 +44,13 @@ module.exports = {
                 return ctx.badRequest('El máximo de compra para este cupón es de ' + rules.max_purchase);
             }
         }
+     
         //si total_items es  0, entonces no hay limite de items
-        if (rules.totalItems && (summary.totalItems > rules.total_items)) {
+        if ( (summary.totalItems > rules.total_items)) {
+            
             return ctx.badRequest('El máximo de items para este cupón es de ' + rules.total_items);
         }
-        return ctx.send({ success: true, data: coupon });
+         return ctx.send({ success: true, data: coupon });
         // if (couponCode == "TESTCOUPON") {
         //     try {
 
