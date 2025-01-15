@@ -1,7 +1,8 @@
 module.exports = {
     async applyCoupon(ctx) {
         const { couponCode, user, summary } = ctx.request.body;
-        let totalPurchase = summary.totalPrice
+        let totalPurchase = summary.totalPriceProducts;
+
         const userData = await strapi.entityService.findOne('plugin::users-permissions.user', user.id, {
             populate: { orders: true },
         });
@@ -20,8 +21,7 @@ module.exports = {
 
         const rules = typeof coupon.rules === 'string' ? JSON.parse(coupon.rules) : coupon.rules;
 
-        console.log('rules', rules)
-        console.log('summary', summary)
+
         // 2. Validar reglas para usuarios logueados
 
         if (rules.new_user && userData.orders.length > 0) {
@@ -35,22 +35,28 @@ module.exports = {
         }
 
 
-        if (totalPurchase < rules.min_purchase) {
-            return ctx.badRequest('El mínimo de compra es de ' + rules.min_purchase);
+
+        if (rules.min_purchase > 0) {
+            if (totalPurchase < rules.min_purchase) {
+                return ctx.badRequest('El mínimo de compra es de ' + rules.min_purchase);
+            }
         }
         //si max_purchase es  0, entonces no hay limite de compra
-        if (rules.max_purchase != 0) {
+        if (rules.max_purchase > 0) {
             if (totalPurchase > rules.max_purchase) {
                 return ctx.badRequest('El máximo de compra para este cupón es de ' + rules.max_purchase);
             }
         }
-     
+
         //si total_items es  0, entonces no hay limite de items
-        if ( (summary.totalItems > rules.total_items)) {
-            
-            return ctx.badRequest('El máximo de items para este cupón es de ' + rules.total_items);
+        if (rules.total_items > 0) {
+            console.log('total items', summary.totalItems);
+            if (summary.totalItems > rules.total_items) {
+
+                return ctx.badRequest('El máximo de items para este cupón es de ' + rules.total_items);
+            }
         }
-         return ctx.send({ success: true, data: coupon });
+        return ctx.send({ success: true, data: coupon });
         // if (couponCode == "TESTCOUPON") {
         //     try {
 
