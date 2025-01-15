@@ -32,7 +32,7 @@ module.exports = [
   'strapi::session',
   'strapi::favicon',
   'strapi::public',
-  'strapi::cors'
+  'strapi::cors',
   // {
   //   name: 'strapi::cors',
   //   config: {
