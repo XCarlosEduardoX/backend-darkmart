@@ -1,4 +1,4 @@
-const Redis = require('ioredis');
+const { Redis } = require('ioredis');
 
 // Conexión a Redis con búsqueda dual (IPv4 e IPv6)
 const redis = new Redis(process.env.REDIS_URL + '?family=0');

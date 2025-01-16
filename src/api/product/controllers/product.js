@@ -1,6 +1,7 @@
 'use strict';
-const cache = require('../../../utils/redisCache');
 
+// Requerir solo 'cache' desde el archivo redisCache.js
+const { cache } = require('../../../utils/redisCache'); 
 
 /**
  * product controller
@@ -42,19 +43,19 @@ module.exports = createCoreController('api::product.product', ({ strapi }) => ({
 
   async create(ctx) {
     const response = await super.create(ctx);
-    await cache.flush();
+    await cache.flush(); // Limpiar la caché cuando un nuevo producto es creado
     return response;
   },
 
   async update(ctx) {
     const response = await super.update(ctx);
-    await cache.flush();
+    await cache.flush(); // Limpiar la caché cuando un producto es actualizado
     return response;
   },
 
   async delete(ctx) {
     const response = await super.delete(ctx);
-    await cache.flush();
+    await cache.flush(); // Limpiar la caché cuando un producto es eliminado
     return response;
   },
 }));
