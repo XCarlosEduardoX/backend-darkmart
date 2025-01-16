@@ -25,6 +25,14 @@ const cache = {
     async flush() {
         await redis.flushall();
     },
+
+    // Eliminar claves que coincidan con un patrón
+    async delPattern(pattern) {
+        const keys = await redis.keys(pattern);
+        if (keys.length > 0) {
+            await redis.del(keys);
+        }
+    },
 };
 
 module.exports = cache;
