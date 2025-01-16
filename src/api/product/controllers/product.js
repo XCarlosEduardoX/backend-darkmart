@@ -42,19 +42,42 @@ module.exports = createCoreController('api::product.product', ({ strapi }) => {
 
     async create(ctx) {
       const response = await super.create(ctx);
-      await cache.flush(); // Limpiar la caché cuando un nuevo producto es creado
+
+      // Limpiar lista de productos en caché
+      await cache.delPattern('products:*');
+
       return response;
     },
 
     async update(ctx) {
-      const response = await super.update(ctx);
-      await cache.flush(); // Limpiar la caché cuando un producto es actualizado
-      return response;
-    },
+  const { id } = ctx.params;
+
+  // Realiza la actualización en la base de datos
+  const response = await super.update(ctx);
+
+  // Clave del caché para el producto actualizado
+  const cacheKey = `product:${id}`;
+
+  // Actualiza el caché con los nuevos datos del producto
+  await cache.set(cacheKey, JSON.stringify(response), 3600); // TTL de 1 hora
+
+  // Opcional: limpiar lista de productos si afecta resultados
+  await cache.delPattern('products:*');
+
+  return response;
+},
 
     async delete(ctx) {
+      const { id } = ctx.params;
       const response = await super.delete(ctx);
-      await cache.flush(); // Limpiar la caché cuando un producto es eliminado
+
+      // Invalidar el caché del producto específico
+      const cacheKey = `product:${id}`;
+      await cache.del(cacheKey);
+
+      // Opcional: limpiar lista de productos si afecta resultados
+      await cache.delPattern('products:*');
+
       return response;
     },
   };
