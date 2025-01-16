@@ -1,61 +1,61 @@
 'use strict';
 
-// Requerir solo 'cache' desde el archivo redisCache.js
-const cache = require('../../../utils/redisCache'); 
-
-/**
- * product controller
- */
-
+const cache = require('../../../utils/redisCache');
 const { createCoreController } = require('@strapi/strapi').factories;
 
-module.exports = createCoreController('api::product.product', ({ strapi }) => ({
-  async find(ctx) {
-    const cacheKey = `products:${JSON.stringify(ctx.query)}`;
+module.exports = createCoreController('api::product.product', ({ strapi }) => {
+  // Helper genérico para manejar el caché
+  const handleCache = async (cacheKey, fetchFunction, ttl = 3600) => {
     const cachedData = await cache.get(cacheKey);
 
     if (cachedData) {
-      return ctx.send(cachedData);
+      console.log('Data retrieved from cache');
+      return JSON.parse(cachedData);
     }
 
-    const { data, meta } = await super.find(ctx);
+    console.log('Fetching data from database');
+    const result = await fetchFunction();
+    await cache.set(cacheKey, JSON.stringify(result), ttl);
 
-    await cache.set(cacheKey, { data, meta }, 3600);
+    return result;
+  };
 
-    return { data, meta };
-  },
+  return {
+    async find(ctx) {
+      const cacheKey = `products:${JSON.stringify(ctx.query)}`;
+      const { data, meta } = await handleCache(
+        cacheKey,
+        async () => await super.find(ctx)
+      );
+      return { data, meta };
+    },
 
-  async findOne(ctx) {
-    const { id } = ctx.params;
-    const cacheKey = `product:${id}`;
-    const cachedData = await cache.get(cacheKey);
+    async findOne(ctx) {
+      const { id } = ctx.params;
+      const cacheKey = `product:${id}`;
+      const { data, meta } = await handleCache(
+        cacheKey,
+        async () => await super.findOne(ctx)
+      );
+      return { data, meta };
+    },
 
-    if (cachedData) {
-      return ctx.send(cachedData);
-    }
+    async create(ctx) {
+      const response = await super.create(ctx);
+      await cache.flush(); // Limpiar la caché cuando un nuevo producto es creado
+      return response;
+    },
 
-    const { data, meta } = await super.findOne(ctx);
+    async update(ctx) {
+      const response = await super.update(ctx);
+      await cache.flush(); // Limpiar la caché cuando un producto es actualizado
+      return response;
+    },
 
-    await cache.set(cacheKey, { data, meta }, 3600);
-
-    return { data, meta };
-  },
-
-  async create(ctx) {
-    const response = await super.create(ctx);
-    await cache.flush(); // Limpiar la caché cuando un nuevo producto es creado
-    return response;
-  },
-
-  async update(ctx) {
-    const response = await super.update(ctx);
-    await cache.flush(); // Limpiar la caché cuando un producto es actualizado
-    return response;
-  },
-
-  async delete(ctx) {
-    const response = await super.delete(ctx);
-    await cache.flush(); // Limpiar la caché cuando un producto es eliminado
-    return response;
-  },
-}));
+    async delete(ctx) {
+      const response = await super.delete(ctx);
+      await cache.flush(); // Limpiar la caché cuando un producto es eliminado
+      return response;
+    },
+  };
+});
