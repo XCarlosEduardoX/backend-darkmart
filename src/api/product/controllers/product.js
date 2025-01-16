@@ -1,7 +1,7 @@
 'use strict';
 
 // Requerir solo 'cache' desde el archivo redisCache.js
-const { cache } = require('../../../utils/redisCache'); 
+const cache = require('../../../utils/redisCache'); 
 
 /**
  * product controller
