@@ -8,7 +8,7 @@ module.exports = ({ env }) => ({
     populateRelations: env.bool('WEBHOOKS_POPULATE_RELATIONS', false),
   },
   // url: env('CLIENT_URL', 'http://localhost:1337'),
-  url: 'http://localhost:1337',
+  url: env('CLIENT_URL', 'http://localhost:1337'),
   forgotPassword: {
     redirectTo: env('FRONTEND_RESET_PASSWORD_URL', 'http://localhost:3000/reset-password'), // URL de tu frontend
   },
