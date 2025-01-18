@@ -40,7 +40,12 @@
       "required": true
     },
     "units_sold": {
-      "type": "integer"
+      "type": "integer",
+      "private": true
+    },
+    "sku": {
+      "type": "uid",
+      "required": true
     }
   }
 }
