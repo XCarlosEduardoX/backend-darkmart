@@ -45,7 +45,7 @@
     },
     "sku": {
       "type": "uid",
-      "required": true
+      "required": false
     }
   }
 }

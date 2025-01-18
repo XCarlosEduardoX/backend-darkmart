@@ -803,7 +803,6 @@ export interface ApiProductProduct extends Struct.CollectionTypeSchema {
       }>;
     publishedAt: Schema.Attribute.DateTime;
     sku: Schema.Attribute.UID &
-      Schema.Attribute.Required &
       Schema.Attribute.SetPluginOptions<{
         i18n: {
           localized: true;
@@ -864,7 +863,7 @@ export interface ApiVariationVariation extends Struct.CollectionTypeSchema {
     product: Schema.Attribute.Relation<'manyToOne', 'api::product.product'>;
     publishedAt: Schema.Attribute.DateTime;
     size: Schema.Attribute.String;
-    sku: Schema.Attribute.UID & Schema.Attribute.Required;
+    sku: Schema.Attribute.UID;
     slug: Schema.Attribute.UID<'size'>;
     stock: Schema.Attribute.Integer;
     units_sold: Schema.Attribute.Integer & Schema.Attribute.Private;
