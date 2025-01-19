@@ -1,5 +1,5 @@
 module.exports = ({ env }) => ({
-  // ...
+
   email: {
     config: {
       provider: 'strapi-provider-email-resend',
@@ -11,16 +11,6 @@ module.exports = ({ env }) => ({
         defaultReplyTo: 'mrlocked4@gmail.com',
       },
     }
-    // config: {
-    //   provider: 'sendgrid',
-    //   providerOptions: {
-    //     apiKey: env('SENDGRID_API_KEY'),
-    //   },
-    //   settings: {
-    //     defaultFrom: 'mrlcoked4@gmail.com',
-    //     defaultReplyTo: 'mrlcoked4@gmail.com',
-    //   },
-    // },
   },
   upload: {
     config: {
@@ -35,6 +25,24 @@ module.exports = ({ env }) => ({
         uploadStream: {},
         delete: {},
       },
+    },
+  },
+  seo: {
+    enabled: true,
+  },
+  'strapi-algolia': {
+    enabled: true,
+    config: {
+      apiKey: env('ALGOLIA_ADMIN_KEY'),
+      applicationId: env('ALGOLIA_APP_ID'),
+      contentTypes: [
+        {
+          name: 'api::product.product', // Nombre del modelo en Strapi
+          index: 'dev_products', // Nombre del índice en Algolia
+          fields: ['product_name', 'description', 'price'], // Campos que quieres sincronizar
+        },
+
+      ],
     },
   },
 

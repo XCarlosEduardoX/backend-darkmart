@@ -696,7 +696,7 @@ export interface ApiProcessedEventProcessedEvent
     singularName: 'processed-event';
   };
   options: {
-    draftAndPublish: true;
+    draftAndPublish: false;
   };
   attributes: {
     createdAt: Schema.Attribute.DateTime;
@@ -802,6 +802,12 @@ export interface ApiProductProduct extends Struct.CollectionTypeSchema {
         };
       }>;
     publishedAt: Schema.Attribute.DateTime;
+    seo_descripcion: Schema.Attribute.Text &
+      Schema.Attribute.SetPluginOptions<{
+        i18n: {
+          localized: true;
+        };
+      }>;
     sku: Schema.Attribute.UID &
       Schema.Attribute.SetPluginOptions<{
         i18n: {

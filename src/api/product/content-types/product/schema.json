@@ -143,6 +143,14 @@
       },
       "type": "uid",
       "required": false
+    },
+    "seo_descripcion": {
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "type": "text"
     }
   }
 }
