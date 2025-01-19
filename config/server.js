@@ -8,7 +8,7 @@ module.exports = ({ env }) => ({
     populateRelations: env.bool('WEBHOOKS_POPULATE_RELATIONS', false),
   },
   // URL pública para generar los enlaces de confirmación de correo
-  url: env('PUBLIC_URL', 'http://localhost:3000'),  // URL de tu frontend
+  url: env('ADMIN_URL', 'http://localhost:1337'),  // URL de tu frontend
 
   admin: {
     // Configuración del panel de administración de Strapi
