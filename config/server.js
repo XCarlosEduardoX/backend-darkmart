@@ -7,9 +7,11 @@ module.exports = ({ env }) => ({
   webhooks: {
     populateRelations: env.bool('WEBHOOKS_POPULATE_RELATIONS', false),
   },
-  // url: env('CLIENT_URL', 'http://localhost:1337'),
-  url: env('CLIENT_URL', 'http://localhost:1337'),
-  forgotPassword: {
-    redirectTo: env('FRONTEND_RESET_PASSWORD_URL', 'http://localhost:3000/reset-password'), // URL de tu frontend
+  // URL pública para generar los enlaces de confirmación de correo
+  url: env('PUBLIC_URL', 'http://localhost:3000'),  // URL de tu frontend
+
+  admin: {
+    // Configuración del panel de administración de Strapi
+    url: '/admin',  // Esto asegura que /admin siga estando disponible
   },
 });

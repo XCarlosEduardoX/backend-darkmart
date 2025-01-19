@@ -38,7 +38,7 @@ module.exports = ({ env }) => {
           cipher: env('DATABASE_SSL_CIPHER', undefined),
           rejectUnauthorized: env.bool('DATABASE_SSL_REJECT_UNAUTHORIZED', true),
         },
-        // connectionString: env('DATABASE_URL'),
+        // connectionString: env('DATAADMIN_URL'),
         // host: env('DATABASE_HOST', 'localhost'),
         // port: env.int('DATABASE_PORT', 5432),
         // database: env('DATABASE_NAME', 'database-shop'),

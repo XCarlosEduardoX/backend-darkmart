@@ -7,8 +7,8 @@ module.exports = ({ env }) => ({
         apiKey: env('RESEND_API_KEY'), // Required
       },
       settings: {
-        defaultFrom: 'mrlocked4@gmail.com',
-        defaultReplyTo: 'mrlocked4@gmail.com',
+        defaultFrom: 'noreply@everblack.store', // Correo personalizado
+        defaultReplyTo: 'support@everblack.store', // Correo personalizado
       },
     }
   },
@@ -45,7 +45,11 @@ module.exports = ({ env }) => ({
       ],
     },
   },
-
+  'users-permissions': {
+    config: {
+      email_confirmation_redirection: `${process.env.CLIENT_URL}/email-confirmed`, // URL a donde redirigir después de la confirmación
+    },
+  },
   // Step 2: Configure the redis cache plugin
   // "rest-cache": {
   //   config: {

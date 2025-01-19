@@ -1,9 +1,15 @@
 'use strict';
 
 module.exports = {
-  async bootstrap() {
+  async bootstrap({ strapi }) {
     const addSkuToProducts = require('./scripts/add-sku-to-products');
     await addSkuToProducts();
+
+    // const sendEmailToRegisteredUsers = require('./scripts/send-email-verification');
+    // await sendEmailToRegisteredUsers(strapi);
+
+
+
   },
   // /**
   //  * An asynchronous register function that runs before

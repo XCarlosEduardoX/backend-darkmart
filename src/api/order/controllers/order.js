@@ -101,7 +101,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                 try {
                     await strapi.plugins['email'].services.email.send({
                         to: user.email,
-                        from: "mrlocked4@gmail.com",
+                        from: "noreply@everblack.store",
                         subject: 'Compra Everblack recibida',
                         text: `Hola ${user.username}, tu compra se ha recibido con éxito.`,
                     });
@@ -198,8 +198,8 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     }
                 },
                 mode: 'payment',
-                success_url: `${process.env.CLIENT_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
-                cancel_url: `${process.env.CLIENT_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
+                success_url: `${process.env.ADMIN_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.ADMIN_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
                 line_items: productItems,
                 client_reference_id: clientReferenceId,
                 customer_email: user.email,
@@ -678,7 +678,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
     //         // try {
     //         //     await strapi.plugins['email'].services.email.send({
     //         //         to: email,
-    //         //         from: "mrlocked4@gmail.com",
+    //         //         from: "noreply@everblack.store",
 
     //         //         subject: 'Compra Darkmart recibida',
     //         //         html: `<div>
@@ -885,7 +885,7 @@ async function sendEmail(name, email, strapi, products, mainMessage) {
     try {
         await strapi.plugins['email'].services.email.send({
             to: email,
-            from: "mrlocked4@gmail.com",
+            from: "noreply@everblack.store",
 
             subject: mainMessage,
             html: `<div>
