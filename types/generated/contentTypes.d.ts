@@ -623,6 +623,7 @@ export interface ApiOrderOrder extends Struct.CollectionTypeSchema {
     locale: Schema.Attribute.String & Schema.Attribute.Private;
     localizations: Schema.Attribute.Relation<'oneToMany', 'api::order.order'> &
       Schema.Attribute.Private;
+    order_date: Schema.Attribute.DateTime;
     order_id: Schema.Attribute.String;
     order_status: Schema.Attribute.String;
     payment_intent: Schema.Attribute.Relation<
@@ -664,6 +665,7 @@ export interface ApiPaymentIntentPaymentIntent
   };
   attributes: {
     amount: Schema.Attribute.Decimal;
+    create_at: Schema.Attribute.DateTime;
     createdAt: Schema.Attribute.DateTime;
     createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
@@ -674,7 +676,6 @@ export interface ApiPaymentIntentPaymentIntent
     > &
       Schema.Attribute.Private;
     payment_details: Schema.Attribute.JSON;
-    payment_link: Schema.Attribute.Text;
     payment_method: Schema.Attribute.String;
     payment_status: Schema.Attribute.String;
     paymentintent_id: Schema.Attribute.String;
@@ -703,7 +704,8 @@ export interface ApiProcessedEventProcessedEvent
     createdBy: Schema.Attribute.Relation<'oneToOne', 'admin::user'> &
       Schema.Attribute.Private;
     event_created_at: Schema.Attribute.DateTime;
-    id_event: Schema.Attribute.String & Schema.Attribute.Unique;
+    event_id: Schema.Attribute.String & Schema.Attribute.Unique;
+    event_status: Schema.Attribute.String;
     locale: Schema.Attribute.String & Schema.Attribute.Private;
     localizations: Schema.Attribute.Relation<
       'oneToMany',

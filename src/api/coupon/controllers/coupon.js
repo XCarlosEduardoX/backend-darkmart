@@ -17,10 +17,13 @@ module.exports = {
 
         console.log(coupon)
         if (!coupon) {
-            return ctx.badRequest('Cupón inválido o inactivo');
+            return ctx.badRequest('Cupón no encontrado');
         }
         if (isCouponExpired(coupon)) {
             return ctx.badRequest('El cupón ha expirado');
+        }
+        if (!isCouponActive(coupon)) {
+            return ctx.badRequest('El cupón inactivo');
         }
 
         if (coupon.allowed_users.length > 0) {
@@ -162,7 +165,9 @@ function isCouponExpired(coupon) {
     const validUntil = new Date(coupon.valid_until);
     return currentDate > validUntil;
 }
-
+function isCouponActive(coupon) {
+    return coupon.is_active;
+}
 // Función para validar usuario
 function isUserValid(user) {
     return user && user.id;

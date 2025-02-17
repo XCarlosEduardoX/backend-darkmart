@@ -21,9 +21,6 @@
     "pi_status": {
       "type": "string"
     },
-    "payment_link": {
-      "type": "text"
-    },
     "payment_method": {
       "type": "string"
     },
@@ -32,6 +29,9 @@
     },
     "payment_details": {
       "type": "json"
+    },
+    "create_at": {
+      "type": "datetime"
     }
   }
 }

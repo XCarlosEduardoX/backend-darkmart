@@ -12,12 +12,15 @@
   },
   "pluginOptions": {},
   "attributes": {
-    "id_event": {
+    "event_id": {
       "type": "string",
       "unique": true
     },
     "event_created_at": {
       "type": "datetime"
+    },
+    "event_status": {
+      "type": "string"
     }
   }
 }

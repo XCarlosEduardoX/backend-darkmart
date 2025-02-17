@@ -1,6 +1,6 @@
 'use strict';
 
-const cache = require('../../../../utils/redisCache'); // Ruta a tu utilitario de Redis
+const redis = require('../../../../utils/redisCache'); // Ruta a tu utilitario de Redis
 
 // Configuración para la caché
 const CACHE_TTL = 3600; // 1 hora
@@ -17,46 +17,6 @@ const generateShortSku = () => {
   return result;
 };
 
-// Función para manejar la caché
-const handleCache = async (cacheKey, fetchFunction, ttl = CACHE_TTL) => {
-  try {
-    // Intentar recuperar datos de la caché
-    const cachedData = await cache.get(cacheKey);
-    if (cachedData) {
-      console.log(`[CACHE] Data retrieved for key: ${cacheKey}`);
-      return JSON.parse(cachedData);
-    }
-  } catch (error) {
-    console.error(`[CACHE ERROR] Failed to retrieve key ${cacheKey}`, error);
-  }
-
-  // Si no hay datos en caché, ejecuta la función fetchFunction
-  const result = await fetchFunction();
-  try {
-    // Guardar los datos en la caché
-    await cache.set(cacheKey, JSON.stringify(result), ttl);
-    console.log(`[CACHE] Data saved for key: ${cacheKey}`);
-  } catch (error) {
-    console.error(`[CACHE ERROR] Failed to save key ${cacheKey}`, error);
-  }
-
-  return result;
-};
-
-// Función para invalidar una lista de claves de caché
-const invalidateCache = async (keys = []) => {
-  console.log(`Invalidating cache for keys: ${keys}`);
-  for (const key of keys) {
-    await cache.del(key).catch(err => console.error(`Error deleting key ${key}:`, err));
-  }
-};
-
-// Función para invalidar patrones de caché
-const invalidateCachePatterns = async (patterns = []) => {
-  for (const pattern of patterns) {
-    await cache.delPattern(pattern).catch(err => console.error(`Error deleting pattern ${pattern}:`, err));
-  }
-};
 
 module.exports = {
   async beforeCreate(event) {
@@ -98,36 +58,61 @@ module.exports = {
     }
   },
 
-  async afterCreate(event) {
-    console.log('afterCreate: invalidando cache');
-    // Invalidar todos los productos
-    await invalidateCachePatterns(['products:*']);
+  async beforeFindMany(event) {
+    const cacheKey = "products:all";
 
-    // Manejar la caché del producto creado (opcional)
-    const { result } = event;
-    const cacheKey = `product:${result.id}`;
-    await handleCache(cacheKey, async () => result);
+    // Verifica si los datos ya están en cache
+    const cachedData = await redis.get(cacheKey);
+    if (cachedData) {
+      console.log("Retrieving products from cache...");
+      
+      // Si hay datos cacheados, se los asignamos a `event.params`
+      event.result = JSON.parse(cachedData);
+      return event.result; // Retorna la cache en lugar de ir a la DB
+    }
+  },
+
+  async beforeFindOne(event) {
+    const { params } = event;
+    const cacheKey = `products:${params.where.id}`;
+
+    // Verifica si los datos ya están en cache
+    const cachedData = await redis.get(cacheKey);
+    if (cachedData) {      console.log("Retrieving products from cache...");
+
+      event.result = JSON.parse(cachedData);
+      return event.result; // Retorna la cache en lugar de ir a la DB
+    }
+  },
+
+  async afterFindMany(event) {
+    const cacheKey = "products:all";
+
+    // Guarda los datos en Redis después de consultarlos
+    await redis.set(cacheKey, JSON.stringify(event.result), "EX", 60 * 5);
+  },
+
+  async afterFindOne(event) {
+    const { params, result } = event;
+    const cacheKey = `products:${params.where.id}`;
+
+    // Guarda el producto en cache después de consultarlo
+    await redis.set(cacheKey, JSON.stringify(result), "EX", 60 * 5);
+  },
+
+  async afterCreate(event) {
+    await redis.del("products:all"); // Elimina el cache global
   },
 
   async afterUpdate(event) {
-    const { result } = event; // Contiene los datos del registro actualizado
-    console.log(`afterUpdate: invalidando cache para producto ${result.id}`);
-
-    // Invalidar el caché del producto actualizado y la lista de productos
-    await invalidateCache([`product:${result.id}`]);
-    await invalidateCachePatterns(['products:*']);
-
-    // Manejar la caché del producto actualizado (opcional)
-    const cacheKey = `product:${result.id}`;
-    await handleCache(cacheKey, async () => result);
+    const { result } = event;
+    await redis.del(`products:${result.id}`); // Elimina cache del producto actualizado
+    await redis.del("products:all"); // Elimina cache de la lista general
   },
 
   async afterDelete(event) {
-    const { result } = event; // Contiene los datos del registro eliminado
-    console.log(`afterDelete: invalidando cache para producto ${result.id}`);
-
-    // Invalidar el caché del producto eliminado y la lista de productos
-    await invalidateCache([`product:${result.id}`]);
-    await invalidateCachePatterns(['products:*']);
-  }
+    const { params } = event;
+    await redis.del(`products:${params.where.id}`); // Elimina cache del producto eliminado
+    await redis.del("products:all"); // Elimina cache de la lista general
+  },
 };
