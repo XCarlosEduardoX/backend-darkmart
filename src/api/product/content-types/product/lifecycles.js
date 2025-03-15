@@ -1,9 +1,10 @@
 'use strict';
 
-const redis = require('../../../../utils/redisCache'); // Ruta a tu utilitario de Redis
 
-// Configuración para la caché
-const CACHE_TTL = 3600; // 1 hora
+const redis = require('../../../../utils/redisCache'); // Ruta a tu utilitario de Redis
+const { generateBlurDataURL } = require('../../../../scripts/generateBlurDataURL');
+// // Configuración para la caché
+// const CACHE_TTL = 3600; // 1 hora
 
 // Función para generar un identificador único corto
 const generateShortSku = () => {
@@ -19,9 +20,12 @@ const generateShortSku = () => {
 
 
 module.exports = {
+
   async beforeCreate(event) {
     const { data } = event.params;
+    console.log('agregando el sku', data);
 
+    console.log('data', data);
     // Generar el SKU si no está definido
     if (!data.sku) {
       let newSku;
@@ -30,33 +34,52 @@ module.exports = {
       // Verificar si el SKU ya existe
       while (exists) {
         newSku = generateShortSku();
-        exists = await strapi.query('api::product.product').findOne({
+        exists = await strapi.query('api::variation.variation').findOne({
           where: { sku: newSku }
         });
       }
 
       data.sku = newSku;
+    };
+    if (data.images && data.images.length > 0) {
+      if (!data.blurDataURL) {
+        console.log('generando el blurDataURL');
+
+        const blurDataURL = await generateBlurDataURL(data.images[0].url, data.images[0].id);
+        // data.blurDataURL = blurDataURL;
+        data.images[0].blurDataURL = blurDataURL;
+        data.blurDataURL = blurDataURL;
+      }
+
     }
   },
 
   async beforeUpdate(event) {
+
     const { data } = event.params;
+    if (data.images && data.images.length > 0) {
+      if (!data.blurDataURL) {
+        console.log('generando el blurDataURL');
 
-    // Generar un nuevo SKU solo si falta
-    if (!data.sku) {
-      let newSku;
-      let exists = true;
+        const blurDataURL = await generateBlurDataURL(data.images[0].url, data.images[0].id);
+        // data.blurDataURL = blurDataURL;
+        data.images[0].blurDataURL = blurDataURL;
+        data.blurDataURL = blurDataURL;
 
-      while (exists) {
-        newSku = generateShortSku();
-        exists = await strapi.query('api::product.product').findOne({
-          where: { sku: newSku }
-        });
       }
 
-      data.sku = newSku;
     }
   },
+
+
+
+
+
+
+
+
+
+
 
   async beforeFindMany(event) {
     const cacheKey = "products:all";
@@ -65,7 +88,7 @@ module.exports = {
     const cachedData = await redis.get(cacheKey);
     if (cachedData) {
       console.log("Retrieving products from cache...");
-      
+
       // Si hay datos cacheados, se los asignamos a `event.params`
       event.result = JSON.parse(cachedData);
       return event.result; // Retorna la cache en lugar de ir a la DB
@@ -78,7 +101,8 @@ module.exports = {
 
     // Verifica si los datos ya están en cache
     const cachedData = await redis.get(cacheKey);
-    if (cachedData) {      console.log("Retrieving products from cache...");
+    if (cachedData) {
+      console.log("Retrieving products from cache...");
 
       event.result = JSON.parse(cachedData);
       return event.result; // Retorna la cache en lugar de ir a la DB

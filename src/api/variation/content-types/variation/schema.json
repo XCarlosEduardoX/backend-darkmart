@@ -16,7 +16,8 @@
       "type": "decimal"
     },
     "discount": {
-      "type": "decimal"
+      "type": "decimal",
+      "default": 0
     },
     "size": {
       "type": "string"

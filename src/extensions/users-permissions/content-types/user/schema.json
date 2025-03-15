@@ -65,12 +65,6 @@
       "inversedBy": "users",
       "configurable": false
     },
-    "coupon": {
-      "type": "relation",
-      "relation": "manyToOne",
-      "target": "api::coupon.coupon",
-      "inversedBy": "users"
-    },
     "addresses": {
       "type": "relation",
       "relation": "oneToMany",

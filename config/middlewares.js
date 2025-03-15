@@ -33,6 +33,7 @@ module.exports = [
   'strapi::favicon',
   'strapi::public',
   'strapi::cors',
+
   // {
   //   name: 'strapi::cors',
   //   config: {

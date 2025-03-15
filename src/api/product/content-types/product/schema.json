@@ -32,7 +32,7 @@
     },
     "description": {
       "type": "text",
-      "maxLength": 1200,
+      "maxLength": 10200,
       "pluginOptions": {
         "i18n": {
           "localized": true
@@ -114,9 +114,7 @@
       "required": false,
       "allowedTypes": [
         "images",
-        "files",
-        "videos",
-        "audios"
+        "files"
       ],
       "pluginOptions": {
         "i18n": {
@@ -150,6 +148,9 @@
           "localized": true
         }
       },
+      "type": "text"
+    },
+    "blurDataURL": {
       "type": "text"
     }
   }

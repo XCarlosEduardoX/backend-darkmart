@@ -15,7 +15,6 @@ module.exports = {
         // Buscar cupón
         const coupon = await findCouponByCode(couponCodeString)
 
-        console.log(coupon)
         if (!coupon) {
             return ctx.badRequest('Cupón no encontrado');
         }
@@ -44,22 +43,22 @@ module.exports = {
             }
 
             // Verificar si el usuario ya ha usado el cupón
-            const hasUsedCoupon = await userHasUsedCoupon(user.id, coupon.id);
-            if (hasUsedCoupon) {
-                return ctx.badRequest('Ya has utilizado este cupón');
-            }
+            // const hasUsedCoupon = await userHasUsedCoupon(user.id, coupon.id);
+            // if (hasUsedCoupon) {
+            //     return ctx.badRequest('Ya has utilizado este cupón');
+            // }
 
 
 
             if (rules.min_purchase > 0) {
                 if (totalPurchase < rules.min_purchase) {
-                    return ctx.badRequest('El mínimo de compra es de $' + (rules.min_purchase) / 100 + ' MXN');
+                    return ctx.badRequest('El mínimo de compra es de $' + (rules.min_purchase*100) / 100 + ' MXN');
                 }
             }
             //si max_purchase es  0, entonces no hay limite de compra
             if (rules.max_purchase > 0) {
                 if (totalPurchase > rules.max_purchase) {
-                    return ctx.badRequest('El máximo de compra para este cupón es de $' + (rules.max_purchase) / 100 + ' MXN');
+                    return ctx.badRequest('El máximo de compra para este cupón es de $' + (rules.max_purchase*100) / 100 + ' MXN');
                 }
             }
 
@@ -153,7 +152,7 @@ async function userHasUsedCoupon(userId, couponId) {
 async function findCouponByCode(code) {
     const [coupon] = await strapi.entityService.findMany('api::coupon.coupon', {
         filters: { code },
-        populate: { 'allowed_users': true },
+        populate: { allowed_users: true },
         limit: 1,
     });
     return coupon;

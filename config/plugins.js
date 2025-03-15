@@ -7,8 +7,8 @@ module.exports = ({ env }) => ({
         apiKey: env('RESEND_API_KEY'), // Required
       },
       settings: {
-        defaultFrom: 'noreply@everblack.store', // Correo personalizado
-        defaultReplyTo: 'support@everblack.store', // Correo personalizado
+        defaultFrom: 'delivered@resend.dev', // Correo personalizado
+        defaultReplyTo: 'delivered@resend.dev', // Correo personalizado
       },
     }
   },

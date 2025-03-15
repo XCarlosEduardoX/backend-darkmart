@@ -59,6 +59,10 @@
     },
     "order_date": {
       "type": "datetime"
+    },
+    "payment_method": {
+      "type": "string",
+      "required": false
     }
   }
 }

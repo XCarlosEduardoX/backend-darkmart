@@ -20,7 +20,9 @@ const generateShortSku = () => {
 module.exports = {
   async beforeCreate(event) {
     const { data } = event.params;
+    console.log('agregando el sku', data);
 
+    console.log('data', data);
     // Generar el SKU si no está definido
     if (!data.sku) {
       let newSku;
@@ -40,6 +42,8 @@ module.exports = {
 
   async beforeUpdate(event) {
     const { data } = event.params;
+    console.log('actualizando el sku', data);
+    // Generar un nuevo SKU solo si falta
 
     // Generar un nuevo SKU solo si falta
     if (!data.sku) {

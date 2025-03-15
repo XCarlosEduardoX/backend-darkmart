@@ -1,6 +1,12 @@
 const { Redis } = require('ioredis');
 
-const redis = new Redis(process.env.REDIS_URL + "?family=0");
+// const redis = new Redis(process.env.REDIS_URL + "?family=0");
+
+const redis = new Redis({
+    host: "172.17.103.125",
+    port: 6379,
+    password: "lalo123lalo123",
+});
 
 // Verificación de la conexión con Redis
 (async () => {

@@ -27,12 +27,6 @@
       "type": "boolean",
       "default": false
     },
-    "users": {
-      "type": "relation",
-      "relation": "oneToMany",
-      "target": "plugin::users-permissions.user",
-      "mappedBy": "coupon"
-    },
     "rules": {
       "type": "json"
     },

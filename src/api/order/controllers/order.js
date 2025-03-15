@@ -4,6 +4,7 @@
 const stripe = require('stripe')(process.env.STRIPE_KEY);
 const { v4: uuidv4 } = require('uuid');
 const { createCoreController } = require('@strapi/strapi').factories;
+const generateUniqueID = require('../../../scripts/generateUniqueID');
 
 
 const retryQueue = [];
@@ -84,7 +85,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                 }
             }
 
-          
+
 
             // Enviar email de confirmación
             if (user?.email) {
@@ -157,9 +158,15 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
     // Crear nueva orden y sesión de Stripe
     async create(ctx) {
-        console.log('Creando orden...');
         const { products, user, coupon_used, summary, address } = ctx.request.body;
-        const order_id = uuidv4();
+        const order_id = 'MX-' + generateUniqueID();
+        // console.log('Creando orden:', order_id);
+        // console.log('Productos:', products);
+        // console.log('Usuario:', user);
+        // console.log('Cupón:', coupon_used);
+        // console.log('Resumen:', summary);
+        // console.log('Dirección:', address);
+
 
         try {
             const productItems = summary.products.map(product => ({
@@ -168,7 +175,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     product_data: {
                         name: product.product_name,
                     },
-                    unit_amount: product.realPrice,
+                    unit_amount: product.discount > 0 ? product.discountPrice : product.realPrice,
                 },
                 quantity: product.stockSelected,
             }));
@@ -177,7 +184,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             const clientReferenceId = user.id;
 
             const sessionData = {
-                payment_method_types: ['card', 'oxxo', ],
+                payment_method_types: ['card', 'oxxo',],
                 payment_method_options: {
                     oxxo: {
                         expires_after_days: 2,
@@ -205,13 +212,24 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             };
 
             let subtotal = products.reduce((sum, product) => sum + product.realPrice * product.stockSelected, 0);
-            let discount = 0;
+
 
             if (coupon_used && coupon_used.is_active) {
-               
-              }
+                sessionData.discounts = [
+                    {
+                        coupon: await stripe.coupons.create({
+                            name: coupon_used.code,
+                            percent_off: coupon_used.discount,
+                            duration: 'once',
+                        }).then(coupon => coupon.id),
+                    },
+                ];
+            }
 
             const session = await stripe.checkout.sessions.create(sessionData);
+            const discount = coupon_used && coupon_used.is_active
+                ? (subtotal * coupon_used.discount) / 100
+                : 0;
 
             const total = subtotal + summary.shipping_cost - discount;
 
@@ -224,6 +242,8 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                 address,
                 order_status: 'pending',
                 shipping_status: 'pending',
+                order_date: new Date(),
+
             };
 
             if (coupon_used) {
@@ -231,6 +251,11 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             }
 
             const order = await strapi.service('api::order.order').create({ data: orderDatas });
+
+            //actualizar stock de productos
+            updateStockProducts(orderDatas.products, "minus");
+
+
             return { stripeSession: session, order };
         } catch (e) {
             console.error(e);
@@ -345,6 +370,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
  * @param {{ data: { object: any; }; type: string; }} event
  */
 async function processEvent(event) {
+    console.log('evento', event.type);
     const paymentData = event.data?.object; // Optional chaining for safety
     if (!paymentData) {
         console.error("Missing payment data in event:", event);
@@ -355,10 +381,20 @@ async function processEvent(event) {
 
     switch (event.type) {
         case 'payment_intent.created':
+            // actualizar en order el metodo de pago
+            await updateOrderPaymentMethod(paymentData);
+
+            break;
         case 'payment_intent.succeeded':
+            await updateOrderPaymentMethod(paymentData);
+
+            break;
         case 'payment_intent.payment_failed':
         case 'payment_intent.canceled':
         case 'payment_intent.requires_action':
+            await updateOrderPaymentMethod(paymentData);
+
+
             await createOrUpdatePaymentIntent(paymentData, created_at);
             if (event.type === 'payment_intent.requires_action' && paymentData.payment_method_types[0] === 'oxxo') {
                 await handleOxxoPayment(paymentData);
@@ -371,13 +407,15 @@ async function processEvent(event) {
             break;
 
         case 'checkout.session.completed':
+            console.log("Pago con tarjeta estatus:", paymentData.status);
             console.log(`Pago con tarjeta ${paymentData.status === 'paid' ? 'completado' : 'no completado'}:`, paymentData);
             fulfillCheckout(paymentData.id, false);
             break;
 
         case 'checkout.session.async_payment_failed':
+            await updateOrderStatus(paymentData);
+            break;
         case 'checkout.session.expired':
-            console.log(`Pago asíncrono/expirado:`, paymentData);
             await updateOrderStatus(paymentData);
             break;
 
@@ -393,20 +431,41 @@ async function processEvent(event) {
  */
 async function createOrUpdatePaymentIntent(paymentData, created_at) {
     try {
-        await strapi.service('api::payment-intent.payment-intent').create({
-            data: {
-                paymentintent_id: paymentData.id,
-                amount: paymentData.amount,
-                pi_status: paymentData.status,
-                payment_method: paymentData.payment_method_types?.[0], // Optional chaining
-                created_at: created_at,
-            },
+        // Buscar si ya existe un PaymentIntent con el paymentintent_id
+
+        const [existingPaymentIntent] = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
+            filters: { paymentintent_id: paymentData.id },
+            limit: 1,
         });
+
+        if (existingPaymentIntent) {
+            // Si existe, actualizamos el PaymentIntent con la nueva información
+            await strapi.service('api::payment-intent.payment-intent').update(existingPaymentIntent.id, {
+                data: {
+                    amount: paymentData.amount,
+                    pi_status: paymentData.status,
+                    payment_method: paymentData.payment_method_types?.[0], // Optional chaining
+                    created_at: created_at,
+                },
+            });
+        } else {
+            // Si no existe, lo creamos
+            await strapi.service('api::payment-intent.payment-intent').create({
+                data: {
+                    paymentintent_id: paymentData.id,
+                    amount: paymentData.amount,
+                    pi_status: paymentData.status,
+                    payment_method: paymentData.payment_method_types?.[0], // Optional chaining
+                    created_at: created_at,
+                },
+            });
+        }
     } catch (error) {
         console.error("Error creating/updating payment intent:", error);
         // Consider adding error handling/retry logic here
     }
 }
+
 
 /**
  * @param {{ next_action: { oxxo_display_details: { hosted_voucher_url: any; }; }; payment_method_options: { oxxo: { expires_after_days: any; }; }; receipt_email: any; }} paymentData
@@ -428,10 +487,9 @@ async function handleOxxoPayment(paymentData) {
 }
 
 
-/**
- * @param {{ status: any; id: any; }} paymentData
- */
-async function updateOrderStatus(paymentData, orderStatus = paymentData.status) { // Default to paymentData.status
+
+async function updateOrderStatus(paymentData, orderStatus = paymentData.status) {
+    // Default to paymentData.status
     try {
         const orders = await strapi.entityService.findMany('api::order.order', {
             filters: { stripe_id: paymentData.id },
@@ -441,6 +499,10 @@ async function updateOrderStatus(paymentData, orderStatus = paymentData.status) 
             await strapi.entityService.update('api::order.order', orders[0].id, {
                 data: { order_status: orderStatus },
             });
+
+            //actualizar stock de productos
+            const products = orders[0].products;
+            updateStockProducts(products, "plus");
         }
     } catch (error) {
         console.error("Error updating order status:", error);
@@ -465,24 +527,32 @@ async function fulfillCheckout(sessionId, async_payment) {
     const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId, {
         expand: ['line_items'],
     });
-    const stripe_id = checkoutSession.id;
+    const stripe_id = checkoutSession.id; // Optional chaining
     const payment_intent_id = checkoutSession.payment_intent;
-    const orders = await strapi.entityService.findMany('api::order.order', {
-        filters: { stripe_id },
+
+    //buscar el payment_intent en la base de datos
+
+    const [paymentIntent] = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
+        filters: { paymentintent_id: payment_intent_id },
+        limit: 1,
     });
 
+    const orders = await strapi.entityService.findMany('api::order.order', {
+        filters: { stripe_id: stripe_id },
+    });
+    console.log('checkoutSession: ', checkoutSession);
     // Check the Checkout Session's payment_status property
     // to determine if fulfillment should be performed
     if (checkoutSession.payment_status === 'paid') {
         if (orders.length > 0) {
             const orderId = orders[0].id;
-
+            console.log('orderId: ', orderId);
             try {
                 await strapi.entityService.update('api::order.order', orderId, {
                     data: {
                         shipping_status: 'pending',
                         order_status: 'completed',
-                        payment_intent: payment_intent_id,
+                        payment_intent: paymentIntent.id,
                         order_date: new Date(),
                     },
                 });
@@ -494,7 +564,7 @@ async function fulfillCheckout(sessionId, async_payment) {
             }
 
             const products = orders[0].products;
-            updateStockProducts(products);
+            // updateStockProducts(products);
 
             const { name, email } = checkoutSession.customer_details;
             if (async_payment) {
@@ -509,13 +579,7 @@ async function fulfillCheckout(sessionId, async_payment) {
 }
 
 
-/**
- * @param {any} email
- * @param {import("@strapi/types/dist/core").Strapi} strapi
- * @param {string} mainMessage
- * @param {any} voucher_url
- * @param {string} expire_date
- */
+
 async function sendEmailVoucherUrl(email, strapi, mainMessage, voucher_url, expire_date) {
     console.log("sending email");
     try {
@@ -581,7 +645,7 @@ async function sendEmail(name, email, strapi, products, mainMessage) {
 /**
  * @param {string | number | boolean | import("@strapi/types/dist/utils").JSONObject | import("@strapi/types/dist/utils").JSONArray} products
  */
-async function updateStockProducts(products) {
+async function updateStockProducts(products, action) {
     for (const product of products) {
         try {
             const { slug_variant, stockSelected, slug } = product;
@@ -599,8 +663,8 @@ async function updateStockProducts(products) {
                 //bajar stock de la variante
                 await strapi.entityService.update('api::variation.variation', variantData.id, {
                     data: {
-                        stock: variantData.stock - stockSelected,
-                        units_sold: variantData.units_sold + stockSelected,
+                        stock: action === "minus" ? variantData.stock - stockSelected : variantData.stock + stockSelected,
+                        units_sold: action === "minus" ? variantData.units_sold + stockSelected : variantData.units_sold - stockSelected,
 
 
                     },
@@ -615,8 +679,8 @@ async function updateStockProducts(products) {
                 if (productData) {
                     await strapi.entityService.update('api::product.product', productData.id, {
                         data: {
-                            stock: productData.stock - stockSelected,
-                            units_sold: productData.units_sold + stockSelected,
+                            stock: action === "minus" ? productData.stock - stockSelected : productData.stock + stockSelected,
+                            units_sold: action === "minus" ? productData.units_sold + stockSelected : productData.units_sold - stockSelected,
 
 
                         },
@@ -630,3 +694,17 @@ async function updateStockProducts(products) {
     }
 
 }
+async function updateOrderPaymentMethod(paymentData) {
+    console.log('paymentData', paymentData);
+    const orders = await strapi.entityService.findMany('api::order.order', {
+        filters: { stripe_id: paymentData.id },
+    });
+
+    if (orders.length > 0) {
+        const orderId = orders[0].id;
+        await strapi.entityService.update('api::order.order', orderId, {
+            data: { payment_method: paymentData.payment_method_types?.[0] },
+        });
+    }
+}
+
