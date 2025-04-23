@@ -144,7 +144,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
         try {
             const orders = await strapi.entityService.findMany('api::order.order', {
                 filters: { user: userId },
-                populate: ['coupon_used'],
+                populate: ['coupon_used', 'user', 'payment_intent'],
             });
 
             ctx.response.status = 200;
@@ -160,12 +160,6 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
     async create(ctx) {
         const { products, user, coupon_used, summary, address } = ctx.request.body;
         const order_id = 'MX-' + generateUniqueID();
-        // console.log('Creando orden:', order_id);
-        // console.log('Productos:', products);
-        // console.log('Usuario:', user);
-        // console.log('Cupón:', coupon_used);
-        // console.log('Resumen:', summary);
-        // console.log('Dirección:', address);
 
 
         try {
@@ -196,7 +190,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                 line_items: productItems,
                 client_reference_id: clientReferenceId,
                 customer_email: user.email,
-                metadata: { order_id },
+                metadata: { order_id, user_id: user.id },
                 shipping_options: [
                     {
                         shipping_rate_data: {
@@ -281,9 +275,10 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     filters: { stripe_id: session.id },
                 });
                 if (orders.length > 0) {
+                    //obtener metodo de pago
                     const orderId = orders[0].id;
                     await strapi.entityService.update('api::order.order', orderId, {
-                        data: { order_status: 'completed' },
+                        data: { order_status: 'completed', },
                     });
                 }
                 ctx.body = { status: 'completed' };
@@ -296,6 +291,32 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             ctx.body = { error: 'Error al verificar el estado del pago' };
         }
     },
+
+    //cancelar pedido
+    // async cancelOrder(ctx) {
+    //     const { orderId } = ctx.query;
+    //     if (!orderId) {
+    //         ctx.response.status = 400;
+    //         return ctx.body = { error: 'orderId es requerido' };
+    //     }
+
+    //     try {
+    //         const order = await strapi.entityService.findMany('api::order.order', {
+    //             filters: { id: orderId },
+    //         });
+    //         if (order.length > 0) {
+    //             const orderId = order[0].id;
+    //             await strapi.entityService.update('api::order.order', orderId, {
+    //                 data: { order_status: 'canceled' },
+    //             });
+    //         }
+    //         ctx.body = { status: 'canceled' };
+    //     } catch (error) {
+    //         console.error('Error al cancelar el pedido:', error);
+    //         ctx.response.status = 500;
+    //         ctx.body = { error: 'Error al cancelar el pedido' };
+    //     }
+    // }
 
     // Manejo de webhook de Stripe
 
@@ -381,42 +402,45 @@ async function processEvent(event) {
 
     switch (event.type) {
         case 'payment_intent.created':
-            // actualizar en order el metodo de pago
-            await updateOrderPaymentMethod(paymentData);
+            // await updateOrderPaymentMethod(paymentData, true);
+            await createOrUpdatePaymentIntent(paymentData);
 
             break;
         case 'payment_intent.succeeded':
-            await updateOrderPaymentMethod(paymentData);
+            // await updateOrderPaymentMethod(paymentData);
+            await createOrUpdatePaymentIntent(paymentData);
 
             break;
         case 'payment_intent.payment_failed':
+            await createOrUpdatePaymentIntent(paymentData);
+            break;
         case 'payment_intent.canceled':
+            await createOrUpdatePaymentIntent(paymentData);
+            break;
         case 'payment_intent.requires_action':
-            await updateOrderPaymentMethod(paymentData);
 
+            console.log('paymentData', paymentData);
 
-            await createOrUpdatePaymentIntent(paymentData, created_at);
-            if (event.type === 'payment_intent.requires_action' && paymentData.payment_method_types[0] === 'oxxo') {
+            await createOrUpdatePaymentIntent(paymentData);
+            // await updateOrderPaymentMethod(paymentData, true);
+            if (event.type === 'payment_intent.requires_action' && paymentData.payment_method_types[0] === 'oxxo' && paymentData.status === 'requires_action') {
                 await handleOxxoPayment(paymentData);
             }
             break;
 
         case 'checkout.session.async_payment_succeeded':
-            console.log('Pago Oxxo completado:', paymentData);
             fulfillCheckout(paymentData.id, true);
             break;
 
         case 'checkout.session.completed':
-            console.log("Pago con tarjeta estatus:", paymentData.status);
-            console.log(`Pago con tarjeta ${paymentData.status === 'paid' ? 'completado' : 'no completado'}:`, paymentData);
             fulfillCheckout(paymentData.id, false);
             break;
 
         case 'checkout.session.async_payment_failed':
-            await updateOrderStatus(paymentData);
+            await updateOrderStatus(paymentData, 'failed');
             break;
         case 'checkout.session.expired':
-            await updateOrderStatus(paymentData);
+            await updateOrderStatus(paymentData, 'expired');
             break;
 
         default:
@@ -425,11 +449,9 @@ async function processEvent(event) {
 }
 
 
-/**
- * @param {{ id: any; amount: any; status: any; payment_method_types: any[]; }} paymentData
- * @param {Date} created_at
- */
-async function createOrUpdatePaymentIntent(paymentData, created_at) {
+
+async function createOrUpdatePaymentIntent(paymentData) {
+    const created_at = paymentData.created ? new Date(paymentData.created * 1000) : null; // Handle missing created timestamp
     try {
         // Buscar si ya existe un PaymentIntent con el paymentintent_id
 
@@ -437,7 +459,7 @@ async function createOrUpdatePaymentIntent(paymentData, created_at) {
             filters: { paymentintent_id: paymentData.id },
             limit: 1,
         });
-
+        console.log('existingPaymentIntent si existe');
         if (existingPaymentIntent) {
             // Si existe, actualizamos el PaymentIntent con la nueva información
             await strapi.service('api::payment-intent.payment-intent').update(existingPaymentIntent.id, {
@@ -446,17 +468,23 @@ async function createOrUpdatePaymentIntent(paymentData, created_at) {
                     pi_status: paymentData.status,
                     payment_method: paymentData.payment_method_types?.[0], // Optional chaining
                     created_at: created_at,
+                    payment_status: paymentData.status,
+                    payment_details: paymentData,
+                    waiting_payment_accreditation: paymentData.status === 'requires_action',
                 },
             });
         } else {
+            console.log('No existe el payment intent, creando');
             // Si no existe, lo creamos
             await strapi.service('api::payment-intent.payment-intent').create({
                 data: {
                     paymentintent_id: paymentData.id,
                     amount: paymentData.amount,
-                    pi_status: paymentData.status,
+                    payment_status: paymentData.status,
                     payment_method: paymentData.payment_method_types?.[0], // Optional chaining
                     created_at: created_at,
+                    payment_details: paymentData,
+                    waiting_payment_accreditation: paymentData.status === 'requires_action',
                 },
             });
         }
@@ -481,23 +509,32 @@ async function handleOxxoPayment(paymentData) {
 
     const expire_date = new Date(Date.now() + expire_days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-    sendEmailVoucherUrl(paymentData.receipt_email, strapi, "Tu pago requiere acción", voucher_url, expire_date);
+    // sendEmailVoucherUrl(paymentData.receipt_email, strapi, "Tu pago requiere acción", voucher_url, expire_date);
 
-    await updateOrderStatus(paymentData, 'pending'); // Pass 'pending' status directly
+    await updateOrderStatus(paymentData, 'pending', true); // Pass 'pending' status directly
 }
 
 
 
-async function updateOrderStatus(paymentData, orderStatus = paymentData.status) {
+async function updateOrderStatus(paymentData, orderStatus = paymentData.status, async_payment = false) {
+    let stripe_id = paymentData.id;
+    let method_payment = paymentData.payment_method_types?.[0];
     // Default to paymentData.status
     try {
         const orders = await strapi.entityService.findMany('api::order.order', {
-            filters: { stripe_id: paymentData.id },
+            filters: { stripe_id: stripe_id },
+            limit: 1,
         });
 
         if (orders.length > 0) {
             await strapi.entityService.update('api::order.order', orders[0].id, {
-                data: { order_status: orderStatus },
+                data: {
+                    order_status: orderStatus,
+                    refund_requested: false,
+                    order_canceled: orderStatus === 'canceled' || orderStatus === 'failed' || orderStatus === 'expired',
+                    payment_method: method_payment
+
+                },
             });
 
             //actualizar stock de productos
@@ -540,13 +577,11 @@ async function fulfillCheckout(sessionId, async_payment) {
     const orders = await strapi.entityService.findMany('api::order.order', {
         filters: { stripe_id: stripe_id },
     });
-    console.log('checkoutSession: ', checkoutSession);
     // Check the Checkout Session's payment_status property
     // to determine if fulfillment should be performed
     if (checkoutSession.payment_status === 'paid') {
         if (orders.length > 0) {
             const orderId = orders[0].id;
-            console.log('orderId: ', orderId);
             try {
                 await strapi.entityService.update('api::order.order', orderId, {
                     data: {
@@ -554,6 +589,10 @@ async function fulfillCheckout(sessionId, async_payment) {
                         order_status: 'completed',
                         payment_intent: paymentIntent.id,
                         order_date: new Date(),
+                        payment_credited: true,
+                        order_canceled: false,
+                        refund_requested: false,
+
                     },
                 });
             } catch (error) {
@@ -569,10 +608,10 @@ async function fulfillCheckout(sessionId, async_payment) {
             const { name, email } = checkoutSession.customer_details;
             if (async_payment) {
                 let mainMessage = "¡Compra recibida! Tu pago se acreditó con éxito";
-                sendEmail(name, email, strapi, products, mainMessage);
+                // sendEmail(name, email, strapi, products, mainMessage);
             } else {
                 let mainMessage = "¡Compra recibida!";
-                sendEmail(name, email, strapi, products, mainMessage);
+                //sendEmail(name, email, strapi, products, mainMessage);
             }
         }
     }
@@ -581,7 +620,6 @@ async function fulfillCheckout(sessionId, async_payment) {
 
 
 async function sendEmailVoucherUrl(email, strapi, mainMessage, voucher_url, expire_date) {
-    console.log("sending email");
     try {
         await strapi.plugins['email'].services.email.send({
             to: email,
@@ -601,7 +639,7 @@ async function sendEmailVoucherUrl(email, strapi, mainMessage, voucher_url, expi
 
             </div>`,
         });
-        console.log('Email enviado con éxito');
+        console.log('Email voucher url enviado con éxito');
     } catch (error) {
         console.log("Error al enviar el email: ", error);
     }
@@ -614,7 +652,6 @@ async function sendEmailVoucherUrl(email, strapi, mainMessage, voucher_url, expi
  * @param {string} mainMessage
  */
 async function sendEmail(name, email, strapi, products, mainMessage) {
-    console.log("sending email");
     try {
         await strapi.plugins['email'].services.email.send({
             to: email,
@@ -694,17 +731,23 @@ async function updateStockProducts(products, action) {
     }
 
 }
-async function updateOrderPaymentMethod(paymentData) {
-    console.log('paymentData', paymentData);
-    const orders = await strapi.entityService.findMany('api::order.order', {
-        filters: { stripe_id: paymentData.id },
-    });
+async function updateOrderPaymentMethod(paymentData, async_payment = false) {
+    // console.log('paymentData', paymentData);
+    // const orders = await strapi.entityService.findMany('api::order.order', {
+    //     filters: { stripe_id: paymentData.id },
+    // });
+    // if (orders.length > 0) {
+    //     const orderId = orders[0].id;
+    //     await strapi.entityService.update('api::order.order', orderId, {
+    //         data: { payment_method: paymentData.payment_method_types?.[0], 
+    //             waiting_payment_accreditation: async_payment },
+    //     });
+    //     return;
+    // }
 
-    if (orders.length > 0) {
-        const orderId = orders[0].id;
-        await strapi.entityService.update('api::order.order', orderId, {
-            data: { payment_method: paymentData.payment_method_types?.[0] },
-        });
-    }
+    // //si no existe la orden, reintentar en 5 segundos
+    // setTimeout(() => {
+    //     updateOrderPaymentMethod(paymentData, async_payment);
+    // }, 5000);
 }
 

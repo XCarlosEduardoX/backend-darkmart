@@ -18,9 +18,6 @@
     "amount": {
       "type": "decimal"
     },
-    "pi_status": {
-      "type": "string"
-    },
     "payment_method": {
       "type": "string"
     },
@@ -32,6 +29,10 @@
     },
     "create_at": {
       "type": "datetime"
+    },
+    "waiting_payment_accreditation": {
+      "type": "boolean",
+      "default": false
     }
   }
 }

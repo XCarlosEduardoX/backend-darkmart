@@ -30,15 +30,6 @@
       "targetField": "product_name",
       "required": true
     },
-    "description": {
-      "type": "text",
-      "maxLength": 10200,
-      "pluginOptions": {
-        "i18n": {
-          "localized": true
-        }
-      }
-    },
     "active": {
       "type": "boolean",
       "default": false,
@@ -150,8 +141,18 @@
       },
       "type": "text"
     },
-    "blurDataURL": {
-      "type": "text"
+    "gender": {
+      "type": "enumeration",
+      "enum": [
+        "Hombre",
+        "Mujer",
+        "Mixto"
+      ],
+      "default": "Hombre",
+      "required": true
+    },
+    "description": {
+      "type": "richtext"
     }
   }
 }

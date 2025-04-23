@@ -60,9 +60,28 @@
     "order_date": {
       "type": "datetime"
     },
-    "payment_method": {
-      "type": "string",
-      "required": false
+    "canceled_at": {
+      "type": "datetime"
+    },
+    "refund_requested_at": {
+      "type": "datetime"
+    },
+    "payment_credited": {
+      "type": "boolean",
+      "default": false
+    },
+    "order_canceled": {
+      "type": "boolean",
+      "default": false
+    },
+    "payment_refunded": {
+      "type": "boolean",
+      "default": false
+    },
+    "total_refunded": {
+      "type": "decimal",
+      "required": true,
+      "default": 0
     }
   }
 }

@@ -85,7 +85,18 @@
     "promo_first_purchase_used": {
       "type": "boolean",
       "default": false,
-      "required": true
+      "required": true,
+      "private": true
+    },
+    "wishlists": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::wishlist.wishlist",
+      "mappedBy": "user"
+    },
+    "wishlist_identifier": {
+      "type": "uid",
+      "targetField": "username"
     }
   }
 }

@@ -12,23 +12,22 @@
     "reset": "strapi develop --reset"
   },
   "dependencies": {
-    "@strapi/plugin-cloud": "5.11.0",
+    "@strapi/plugin-cloud": "5.11.2",
     "@strapi/plugin-seo": "^2.0.4",
-    "@strapi/plugin-users-permissions": "5.11.0",
-    "@strapi/provider-upload-cloudinary": "^5.11.0",
-    "@strapi/strapi": "5.11.0",
-    "axios": "^1.8.3",
-    "compression": "^1.8.0",
+    "@strapi/plugin-users-permissions": "5.11.2",
+    "@strapi/provider-upload-cloudinary": "^5.11.2",
+    "@strapi/strapi": "^5.11.2",
     "ioredis": "^5.4.2",
     "pg": "^8.13.3",
-    "plaiceholder": "^3.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.29.0",
+    "sharp": "^0.33.5",
     "strapi-plugin-strapi-algolia": "^2.0.1",
     "strapi-provider-email-resend": "^1.0.4",
     "stripe": "^17.4.0",
-    "styled-components": "^6.1.15"
+    "styled-components": "^6.1.15",
+    "uuid": "^11.1.0"
   },
   "engines": {
     "node": ">=18.0.0 <=22.x.x",
