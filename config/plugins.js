@@ -4,11 +4,11 @@ module.exports = ({ env }) => ({
     config: {
       provider: 'strapi-provider-email-resend',
       providerOptions: {
-        apiKey: env('RESEND_API_KEY'), // Required
+        apiKey: process.env.RESEND_API_KEY, // Required
       },
       settings: {
-        defaultFrom: 'delivered@resend.dev', // Correo personalizado
-        defaultReplyTo: 'delivered@resend.dev', // Correo personalizado
+        defaultFrom: 'info@everblack.store', // Correo personalizado
+        defaultReplyTo: 'info@everblack.store', // Correo personalizado
       },
     }
   },
