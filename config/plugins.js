@@ -37,7 +37,7 @@ module.exports = ({ env }) => ({
       applicationId: env('ALGOLIA_APP_ID'),
       contentTypes: [
         {
-          name: 'api::product.product', // Nombre del modelo en Strapi
+          name: 'api::product.product', // Nombre del modelo en Strap
           index: 'dev_products', // Nombre del índice en Algolia
           fields: ['product_name', 'description', 'price'], // Campos que quieres sincronizar
         },
