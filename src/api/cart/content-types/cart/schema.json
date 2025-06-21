@@ -4,20 +4,48 @@
   "info": {
     "singularName": "cart",
     "pluralName": "carts",
-    "displayName": "Cart"
+    "displayName": "Cart",
+    "description": "Shopping cart items for users"
   },
   "options": {
-    "draftAndPublish": true
+    "draftAndPublish": false
   },
   "pluginOptions": {},
   "attributes": {
+    "user": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "plugin::users-permissions.user"
+    },
     "product": {
-      "type": "json"
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::product.product"
     },
     "quantity": {
-      "type": "integer"
+      "type": "integer",
+      "required": true,
+      "min": 1,
+      "default": 1
     },
-    "userId": {
+    "selectedVariationSize": {
+      "type": "string"
+    },
+    "selectedVariationId": {
+      "type": "string"
+    },
+    "realPrice": {
+      "type": "decimal"
+    },
+    "discountApplied": {
+      "type": "decimal",
+      "default": 0
+    },
+    "sku": {
+      "type": "string",
+      "required": true
+    },
+    "sessionId": {
       "type": "string"
     }
   }

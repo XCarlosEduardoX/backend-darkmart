@@ -79,16 +79,27 @@ module.exports = {
 
 
 
-
   async beforeFindMany(event) {
-    const cacheKey = "products:all";
+    // Crear una clave única basada en los parámetros de la consulta
+    const { start, limit, where, sort, populate } = event.params;
+    
+    // Crear un hash único para la consulta específica
+    const queryHash = JSON.stringify({
+      start: start || 0,
+      limit: limit || 25,
+      where: where || {},
+      sort: sort || {},
+      populate: populate || {}
+    });
+    
+    const cacheKey = `products:query:${Buffer.from(queryHash).toString('base64')}`;
 
     // Verifica si los datos ya están en cache
     const cachedData = await redis.get(cacheKey);
     if (cachedData) {
-      console.log("Retrieving products from cache...");
+      console.log(`Retrieving products from cache with key: ${cacheKey}`);
 
-      // Si hay datos cacheados, se los asignamos a `event.params`
+      // Si hay datos cacheados, se los asignamos a `event.result`
       event.result = JSON.parse(cachedData);
       return event.result; // Retorna la cache en lugar de ir a la DB
     }
@@ -107,12 +118,23 @@ module.exports = {
       return event.result; // Retorna la cache en lugar de ir a la DB
     }
   },
-
   async afterFindMany(event) {
-    const cacheKey = "products:all";
+    // Crear la misma clave única que se usó en beforeFindMany
+    const { start, limit, where, sort, populate } = event.params;
+    
+    const queryHash = JSON.stringify({
+      start: start || 0,
+      limit: limit || 25,
+      where: where || {},
+      sort: sort || {},
+      populate: populate || {}
+    });
+    
+    const cacheKey = `products:query:${Buffer.from(queryHash).toString('base64')}`;
 
     // Guarda los datos en Redis después de consultarlos
-    await redis.set(cacheKey, JSON.stringify(event.result),);
+    await redis.set(cacheKey, JSON.stringify(event.result), CACHE_TTL);
+    console.log(`Cached products with key: ${cacheKey}`);
   },
 
   async afterFindOne(event) {
@@ -122,20 +144,25 @@ module.exports = {
     // Guarda el producto en cache después de consultarlo
     await redis.set(cacheKey, JSON.stringify(result));
   },
-
   async afterCreate(event) {
-    await redis.del("products:all"); // Elimina el cache global
+    // Eliminar todas las consultas cacheadas de productos
+    await redis.delPattern("products:query:*");
+    console.log("Cleared all product query caches after create");
   },
 
   async afterUpdate(event) {
     const { result } = event;
     await redis.del(`products:${result.id}`); // Elimina cache del producto actualizado
-    await redis.del("products:all"); // Elimina cache de la lista general
+    // Eliminar todas las consultas cacheadas de productos
+    await redis.delPattern("products:query:*");
+    console.log("Cleared all product query caches after update");
   },
 
   async afterDelete(event) {
     const { params } = event;
     await redis.del(`products:${params.where.id}`); // Elimina cache del producto eliminado
-    await redis.del("products:all"); // Elimina cache de la lista general
+    // Eliminar todas las consultas cacheadas de productos
+    await redis.delPattern("products:query:*");
+    console.log("Cleared all product query caches after delete");
   },
 };

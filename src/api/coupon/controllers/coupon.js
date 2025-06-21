@@ -5,7 +5,7 @@ module.exports = {
         let couponCodeString = couponCode.toString().toUpperCase();
 
 
-        let totalPurchase = summary.totalPriceProducts;
+        let totalPurchase = summary.totalPriceProducts * 0.01; // Convertir a pesos mexicanos
         const userData = await strapi.entityService.findOne('plugin::users-permissions.user', user.id, {
             populate: { orders: true },
         });
@@ -52,13 +52,13 @@ module.exports = {
 
             if (rules.min_purchase > 0) {
                 if (totalPurchase < rules.min_purchase) {
-                    return ctx.badRequest('El mínimo de compra es de $' + (rules.min_purchase*100) / 100 + ' MXN');
+                    return ctx.badRequest('El mínimo de compra es de $' + (rules.min_purchase * 100) / 100 + ' MXN');
                 }
             }
             //si max_purchase es  0, entonces no hay limite de compra
             if (rules.max_purchase > 0) {
                 if (totalPurchase > rules.max_purchase) {
-                    return ctx.badRequest('El máximo de compra para este cupón es de $' + (rules.max_purchase*100) / 100 + ' MXN');
+                    return ctx.badRequest('El máximo de compra para este cupón es de $' + (rules.max_purchase * 100) / 100 + ' MXN');
                 }
             }
 
@@ -71,6 +71,7 @@ module.exports = {
                 }
             }
         }
+        coupon.success = true;
         return ctx.send({ success: true, data: coupon });
         // if (couponCode == "TESTCOUPON") {
         //     try {

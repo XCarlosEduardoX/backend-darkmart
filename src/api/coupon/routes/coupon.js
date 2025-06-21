@@ -9,11 +9,12 @@ module.exports = {
     routes: [
         {
             method: 'POST',
-            path: '/coupons/applyCoupon', // Ruta para crear pedidos
+            path: '/coupons/applyCoupon',
             handler: 'coupon.applyCoupon',
             config: {
                 policies: [],
             },
         },
+
     ]
 }

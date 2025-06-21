@@ -82,6 +82,16 @@
       "type": "decimal",
       "required": true,
       "default": 0
+    },
+    "payment_method": {
+      "type": "string",
+      "default": "card"
+    },
+    "customer_name": {
+      "type": "string"
+    },
+    "customer_email": {
+      "type": "string"
     }
   }
 }
