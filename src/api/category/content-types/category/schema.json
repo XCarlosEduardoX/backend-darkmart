@@ -30,15 +30,20 @@
     },
     "discount": {
       "type": "decimal",
-      "default": 0,
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "default": 0
     },
-    "mainImage": {
+    "main_image": {
       "type": "media",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
       "multiple": false,
       "required": false,
       "allowedTypes": [
@@ -46,12 +51,22 @@
         "files",
         "videos",
         "audios"
-      ],
+      ]
+    },
+    "image_background": {
+      "type": "media",
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "multiple": false,
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ]
     }
   }
 }
