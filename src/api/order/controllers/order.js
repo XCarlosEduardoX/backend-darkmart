@@ -77,9 +77,11 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             //guardar user en cupon
             if (coupon_used) {
                 try {
-                    await strapi.entityService.update('api::coupon.coupon', coupon_used.id, {
-                        data: { users: user.id },
-                    });
+                    // Nota: El campo 'users' puede no existir en el schema del cupón
+                    // await strapi.entityService.update('api::coupon.coupon', coupon_used.id, {
+                    //     data: { users: user.id },
+                    // });
+                    console.log(`Cupón ${coupon_used.id} usado por usuario ${user.id}`);
                 } catch (error) {
                     console.error('Error al actualizar el cupón:', error);
                 }
@@ -166,16 +168,26 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
 
         try {
-            const productItems = summary.products.map(product => ({
-                price_data: {
-                    currency: 'mxn',
-                    product_data: {
-                        name: product.product_name,
+            const productItems = summary.products.map(product => {
+                // Crear nombre del producto incluyendo variación si existe
+                let productName = product.product_name;
+                if (product.size && product.size.trim() !== '') {
+                    // Extraer solo el nombre de la talla (antes del primer guión si existe)
+                    const sizeName = product.size.split('-')[0];
+                    productName = `${product.product_name} - Talla: ${sizeName}`;
+                }
+
+                return {
+                    price_data: {
+                        currency: 'mxn',
+                        product_data: {
+                            name: productName,
+                        },
+                        unit_amount: product.discount > 0 ? product.discountPrice : product.realPrice,
                     },
-                    unit_amount: product.discount > 0 ? product.discountPrice : product.realPrice,
-                },
-                quantity: product.stockSelected,
-            }));
+                    quantity: product.stockSelected,
+                };
+            });
 
             const shipping_cost = summary.shipping_cost;
             const clientReferenceId = user.id;
@@ -188,12 +200,26 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     },
                 },
                 mode: 'payment',
+                // URLs configuradas para manejar correctamente los diferentes métodos de pago
                 success_url: `${process.env.PUBLIC_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
-                cancel_url: `${process.env.PUBLIC_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.PUBLIC_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}&cancelled=true`,
                 line_items: productItems,
                 client_reference_id: clientReferenceId,
                 customer_email: user.email,
                 metadata: { order_id, user_id: user.id },
+                // Configurar para que OXXO no redirija automáticamente al voucher
+                payment_intent_data: {
+                    metadata: {
+                        order_id: order_id,
+                        user_id: user.id,
+                        skip_voucher_redirect: 'true' // Flag para nuestro webhook
+                    },
+                    receipt_email: user.email
+                    // Removido setup_future_usage ya que causaba error con valor null
+                },
+                // Desabilitar la página de éxito automática de Stripe para OXXO
+                allow_promotion_codes: false,
+                billing_address_collection: 'auto',
                 shipping_options: [
                     {
                         shipping_rate_data: {
@@ -273,6 +299,10 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
         try {
             const session = await stripe.checkout.sessions.retrieve(session_id);
+            
+            // Obtener información del método de pago
+            const paymentMethod = session.payment_method_types?.[0] || 'unknown';
+            const isOxxoPayment = paymentMethod === 'oxxo';
 
             if (session.payment_status === 'paid') {
                 const orders = await strapi.entityService.findMany('api::order.order', {
@@ -282,12 +312,31 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     //obtener metodo de pago
                     const orderId = orders[0].id;
                     await strapi.entityService.update('api::order.order', orderId, {
-                        data: { order_status: 'completed', },
+                        data: { 
+                            order_status: 'completed',
+                            payment_method: paymentMethod
+                        },
                     });
                 }
-                ctx.body = { status: 'completed' };
+                ctx.body = { 
+                    status: 'completed',
+                    payment_method: paymentMethod,
+                    is_oxxo: isOxxoPayment
+                };
+            } else if (isOxxoPayment && session.payment_status === 'unpaid') {
+                // Para OXXO, mostrar estado pendiente en lugar de fallido
+                ctx.body = { 
+                    status: 'pending',
+                    payment_method: paymentMethod,
+                    is_oxxo: isOxxoPayment,
+                    message: 'Pago OXXO pendiente. Recibirás confirmación por email una vez completado.'
+                };
             } else {
-                ctx.body = { status: 'failed' };
+                ctx.body = { 
+                    status: 'failed',
+                    payment_method: paymentMethod,
+                    is_oxxo: isOxxoPayment
+                };
             }
         } catch (error) {
             console.error('Error al verificar la sesión de pago:', error);
@@ -432,10 +481,10 @@ async function processEventWithRetry(event, maxRetries = 3) {
  */
 const VALID_STATE_TRANSITIONS = {
     'pending': ['processing', 'completed', 'failed', 'canceled', 'expired'],
-    'processing': ['completed', 'failed', 'canceled'],
-    'completed': ['refunded', 'canceled'], // Solo en casos especiales
+    'processing': ['completed', 'failed', 'canceled', 'pending'], // Permitir volver a pending
+    'completed': ['refunded', 'canceled', 'pending'], // Para casos especiales como OXXO
     'failed': ['pending', 'processing'], // Reintentos
-    'canceled': [], // Estado final
+    'canceled': ['pending'], // Permitir reactivación
     'expired': ['pending'], // Reintentos
     'refunded': [] // Estado final
 };
@@ -483,12 +532,27 @@ async function processEventOptimized(event) {
             
             // Manejo especial para OXXO
             if (paymentData.payment_method_types?.[0] === 'oxxo' && paymentData.status === 'requires_action') {
+                console.log(`🏪 Procesando pago OXXO que requiere acción: ${paymentData.id}`);
+                
+                // NO actualizar orden a completed aquí, solo manejar el voucher
                 await handleOxxoPaymentOptimized(paymentData);
+                
+                console.log(`✅ Pago OXXO procesado - Email enviado, orden mantiene estado pending`);
             }
             break;
 
         case 'checkout.session.completed':
-            await handleCheckoutSessionEvent(paymentData, 'completed', false);
+            // Para OXXO, no procesar como completado hasta que realmente se pague
+            const sessionData = await stripe.checkout.sessions.retrieve(paymentData.id);
+            const isOxxoSession = sessionData.payment_method_types?.[0] === 'oxxo';
+            
+            if (isOxxoSession && sessionData.payment_status !== 'paid') {
+                console.log(`Sesión OXXO completada pero no pagada: ${paymentData.id} - Manteniendo estado pending`);
+                // Solo actualizar que la sesión fue completada, pero mantener orden pending
+                await updateOrderStatusOptimized(paymentData.id, 'pending', 'oxxo', true);
+            } else {
+                await handleCheckoutSessionEvent(paymentData, 'completed', false);
+            }
             break;
 
         case 'checkout.session.async_payment_succeeded':
@@ -737,291 +801,6 @@ async function updateOrderStatusOptimized(stripeId, newStatus, paymentMethod = n
 
 
 /**
- * Manejo optimizado de pagos OXXO con validación mejorada
- */
-async function handleOxxoPaymentOptimized(paymentData) {
-    try {
-        console.log(`=== PROCESANDO PAGO OXXO ===`);
-        console.log(`Payment Intent ID: ${paymentData.id}`);
-        console.log(`Payment Intent Status: ${paymentData.status}`);
-        console.log(`Receipt Email: ${paymentData.receipt_email}`);
-        console.log(`Payment Method Types:`, paymentData.payment_method_types);
-        console.log(`Next Action:`, paymentData.next_action);
-        
-        const voucher_url = paymentData.next_action?.oxxo_display_details?.hosted_voucher_url;
-        const expire_days = paymentData.payment_method_options?.oxxo?.expires_after_days;
-        const receipt_email = paymentData.receipt_email;
-
-        console.log(`Voucher URL: ${voucher_url}`);
-        console.log(`Expire days: ${expire_days}`);
-        console.log(`Receipt email: ${receipt_email}`);
-
-        if (!voucher_url || !expire_days) {
-            console.error("❌ Datos incompletos para pago OXXO:", {
-                voucher_url: !!voucher_url,
-                expire_days: !!expire_days,
-                paymentIntentId: paymentData.id,
-                next_action: paymentData.next_action,
-                payment_method_options: paymentData.payment_method_options
-            });
-            return;
-        }
-
-        const expire_date = new Date(Date.now() + expire_days * 24 * 60 * 60 * 1000)
-            .toISOString().split('T')[0];
-
-        console.log(`Procesando pago OXXO para Payment Intent: ${paymentData.id}`);
-        console.log(`Voucher URL generado, expira: ${expire_date}`);
-
-        // Enviar email con voucher
-        if (receipt_email) {
-            try {
-                console.log(`🔄 Intentando enviar email OXXO a: ${receipt_email}`);
-                
-                // Versión simplificada para testing - Usar configuración similar a emails que funcionan
-                const simpleEmailConfig = {
-                    to: receipt_email,
-                    from: "noreply@everblack.store", // Intentar primero con el dominio principal
-                    subject: "Tu pago OXXO está listo - EverBlack Store",
-                    html: `
-                        <h2>🏪 Tu pago OXXO está listo</h2>
-                        <p>Hola,</p>
-                        <p>Tu pedido está confirmado. Para completar tu compra, ve a cualquier tienda OXXO y presenta el siguiente comprobante:</p>
-                        <p><a href="${voucher_url}" style="background-color: #000; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px;">📄 Descargar Comprobante OXXO</a></p>
-                        <p><strong>Fecha límite:</strong> ${expire_date}</p>
-                        <p>Gracias por elegir EverBlack Store 🖤</p>
-                    `
-                };
-
-                console.log(`📧 Configuración email simplificada:`, simpleEmailConfig);
-
-                try {
-                    await strapi.plugins['email'].services.email.send(simpleEmailConfig);
-                    console.log(`✅ Email OXXO enviado exitosamente a: ${receipt_email}`);
-                } catch (domainError) {
-                    console.warn(`⚠️ Fallo con dominio everblack.store, intentando con configuración alternativa`);
-                    console.error(`Error dominio principal:`, domainError.message);
-                    
-                    // Intentar con configuración más básica sin CC/BCC
-                    const basicEmailConfig = {
-                        to: receipt_email,
-                        from: "noreply@everblack.store",
-                        subject: "Tu pago OXXO está listo",
-                        html: `<p>Tu voucher OXXO: <a href="${voucher_url}">Descargar</a></p><p>Expira: ${expire_date}</p>`
-                    };
-                    
-                    await strapi.plugins['email'].services.email.send(basicEmailConfig);
-                    console.log(`✅ Email OXXO básico enviado exitosamente a: ${receipt_email}`);
-                }
-            } catch (emailError) {
-                console.error(`❌ Error enviando email OXXO a ${receipt_email}:`, emailError.message || emailError);
-                
-                // Si falla el email simplificado, intentar con el template completo
-                try {
-                    console.log(`🔄 Intentando con template completo...`);
-                    await sendOXXOVoucherEmail(
-                        receipt_email, 
-                        strapi, 
-                        "Tu pago requiere acción - OXXO", 
-                        voucher_url, 
-                        expire_date
-                    );
-                    console.log(`✅ Email OXXO (template completo) enviado exitosamente a: ${receipt_email}`);
-                } catch (templateError) {
-                    console.error(`❌ Error también con template completo:`, templateError.message || templateError);
-                    // No lanzar error - el voucher sigue siendo válido sin el email
-                }
-            }
-        } else {
-            console.warn(`⚠️ No hay receipt_email disponible para enviar el voucher OXXO`);
-        }
-
-        // Actualizar orden con estado pending y información de OXXO
-        console.log(`🔄 Actualizando orden a estado pending para payment intent: ${paymentData.id}`);
-        await updateOrderStatusOptimized(paymentData.id, 'pending', 'oxxo');
-
-        // Enviar email de pedido pendiente para OXXO
-        if (receipt_email) {
-            try {
-                console.log(`🔄 Buscando orden para enviar email de pedido pendiente`);
-                // Buscar la orden para obtener productos y datos del cliente
-                const orders = await strapi.entityService.findMany('api::order.order', {
-                    filters: { stripe_id: paymentData.id },
-                    limit: 1,
-                });
-
-                console.log(`Órdenes encontradas: ${orders.length}`);
-
-                if (orders.length > 0 && orders[0].products) {
-                    console.log(`🔄 Enviando email de pedido pendiente OXXO`);
-                    await sendPendingPaymentEmail(
-                        orders[0]['customer_name'] || 'Cliente',
-                        receipt_email,
-                        strapi,
-                        orders[0].products,
-                        'oxxo'
-                    );
-                    console.log(`✅ Email de pedido pendiente OXXO enviado a: ${receipt_email}`);
-                } else {
-                    console.warn(`⚠️ No se encontró orden o productos para enviar email de pedido pendiente`);
-                }
-            } catch (emailError) {
-                console.error(`❌ Error enviando email de pedido pendiente:`, emailError.message || emailError);
-                // No lanzar error - no es crítico para el procesamiento del pago
-            }
-        }
-        
-        console.log(`✅ Procesamiento OXXO completado para Payment Intent: ${paymentData.id}`);
-        
-    } catch (error) {
-        console.error(`❌ Error procesando pago OXXO para ${paymentData.id}:`, error);
-        throw error;
-    }
-}
-
-/**
- * Fulfillment optimizado de checkout con validación mejorada
- */
-async function fulfillCheckoutOptimized(sessionId, isAsyncPayment) {
-    try {
-        console.log(`Iniciando fulfillment para sesión: ${sessionId}, async: ${isAsyncPayment}`);
-        
-        // Retrieve the Checkout Session
-        const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId, {
-            expand: ['line_items'],
-        });
-
-        const payment_intent_id = checkoutSession.payment_intent;
-
-        if (!payment_intent_id) {
-            console.error(`No se encontró payment_intent para sesión: ${sessionId}`);
-            return;
-        }
-
-        // Buscar Payment Intent en la base de datos
-        const paymentIntents = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
-            filters: { paymentintent_id: payment_intent_id },
-            limit: 1,
-        });
-
-        // Buscar orden
-        const orders = await strapi.entityService.findMany('api::order.order', {
-            filters: { stripe_id: sessionId },
-            limit: 1,
-        });
-
-        if (orders.length === 0) {
-            console.error(`Orden no encontrada para sesión: ${sessionId}`);
-            return;
-        }
-
-        const order = orders[0];
-
-        // Para pagos OXXO, es normal que la sesión esté "unpaid" hasta completar el pago en tienda
-        const paymentMethodFromSession = checkoutSession.payment_method_types?.[0];
-        const isOxxoPayment = paymentMethodFromSession === 'oxxo' || 
-                              checkoutSession.payment_method_options?.oxxo ||
-                              order['payment_method'] === 'oxxo';
-
-        // Verificar estado de pago - Para OXXO permitir procesamiento aún si no está pagado
-        if (checkoutSession.payment_status !== 'paid' && !isOxxoPayment) {
-            console.log(`Sesión ${sessionId} no está pagada. Estado: ${checkoutSession.payment_status}`);
-            return;
-        }
-
-        // Para OXXO, solo loguear el estado pero continuar procesando
-        if (isOxxoPayment && checkoutSession.payment_status !== 'paid') {
-            console.log(`Sesión OXXO ${sessionId} no está pagada. Estado: ${checkoutSession.payment_status} - Continuando procesamiento para OXXO`);
-        }
-
-        // Evitar procesar la misma orden múltiples veces
-        if (order.order_status === 'completed' && order['payment_credited']) {
-            console.log(`Orden ${order.id} ya fue completada previamente`);
-            return;
-        }
-
-        console.log(`Completando orden ${order.id} para sesión ${sessionId}`);
-
-        // Actualizar orden como completada
-        const updateData = {
-            shipping_status: 'pending',
-            order_status: 'completed',
-            payment_credited: true,
-            order_canceled: false,
-            refund_requested: false,
-            order_date: new Date(),
-            last_updated: new Date(),
-            payment_method: order['payment_method'] || 'card'
-        };
-
-        // Guardar datos del cliente si están disponibles
-        const { name: customerName, email: customerEmail } = checkoutSession.customer_details || {};
-        if (customerName) updateData.customer_name = customerName;
-        if (customerEmail) updateData.customer_email = customerEmail;
-
-        // Vincular con Payment Intent si existe
-        if (paymentIntents.length > 0) {
-            updateData.payment_intent = paymentIntents[0].id;
-        }
-
-        await strapi.entityService.update('api::order.order', order.id, {
-            data: updateData
-        });
-
-        console.log(`Orden ${order.id} completada exitosamente`);
-
-        // Enviar email de confirmación con tipo de pago detectado
-        const { name: emailCustomerName, email: emailCustomerEmail } = checkoutSession.customer_details || {};
-        if (emailCustomerEmail && order.products) {
-            try {
-                // Detectar tipo de pago
-                const paymentMethod = updateData.payment_method || 'card';
-                
-                await sendOrderConfirmationEmail(
-                    emailCustomerName || order['customer_name'] || 'Cliente', 
-                    emailCustomerEmail, 
-                    strapi, 
-                    order.products, 
-                    isAsyncPayment ? "¡Compra confirmada! Tu pago se acreditó con éxito" : "¡Compra confirmada!",
-                    paymentMethod,
-                    isAsyncPayment
-                );
-                console.log(`Email de confirmación enviado a: ${emailCustomerEmail} (${paymentMethod}, async: ${isAsyncPayment})`);
-            } catch (emailError) {
-                console.error(`Error enviando email de confirmación:`, emailError);
-                // No lanzar error - la orden ya fue procesada
-            }
-        }
-
-    } catch (error) {
-        console.error(`Error en fulfillment para sesión ${sessionId}:`, error);
-        
-        // Marcar orden como fallida en caso de error crítico
-        try {
-            const orders = await strapi.entityService.findMany('api::order.order', {
-                filters: { stripe_id: sessionId },
-                limit: 1,
-            });
-            
-            if (orders.length > 0) {
-                await strapi.entityService.update('api::order.order', orders[0].id, {
-                    data: { 
-                        order_status: 'failed',
-                        last_updated: new Date()
-                    }
-                });
-            }
-        } catch (updateError) {
-            console.error(`Error actualizando orden a fallida:`, updateError);
-        }
-        
-        throw error;
-    }
-}
-
-
-
-/**
  * Template base para todos los emails con diseño profesional
  */
 function createEmailTemplate(content, title = "EverBlack Store") {
@@ -1062,112 +841,11 @@ function createEmailTemplate(content, title = "EverBlack Store") {
                 padding: 40px;
                 color: #333333;
             }
-            .content h2 {
-                color: #000000;
-                font-size: 24px;
-                margin-bottom: 20px;
-                font-weight: 400;
-            }
-            .content p {
-                font-size: 16px;
-                margin-bottom: 15px;
-                color: #555555;
-            }
-            .button {
-                display: inline-block;
-                background: linear-gradient(135deg, #000000 0%, #333333 100%);
-                color: white !important;
-                padding: 15px 30px;
-                text-decoration: none;
-                border-radius: 5px;
-                font-weight: 500;
-                margin: 20px 0;
-                transition: transform 0.2s;
-            }
-            .button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 6px 12px rgba(0, 0, 0, 0.2);
-            }
-            .alert {
-                background-color: #fff3cd;
-                border: 1px solid #ffeaa7;
-                border-radius: 5px;
-                padding: 15px;
-                margin: 20px 0;
-                color: #856404;
-            }
-            .alert.success {
-                background-color: #d4edda;
-                border-color: #c3e6cb;
-                color: #155724;
-            }
-            .alert.warning {
-                background-color: #fff3cd;
-                border-color: #ffeaa7;
-                color: #856404;
-            }
-            .alert.info {
-                background-color: #cce7ff;
-                border-color: #b8daff;
-                color: #004085;
-            }
-            .products-list {
-                background-color: #f8f9fa;
-                border-radius: 8px;
-                padding: 20px;
-                margin: 20px 0;
-            }
-            .product-item {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                padding: 12px 0;
-                border-bottom: 1px solid #e9ecef;
-            }
-            .product-item:last-child {
-                border-bottom: none;
-            }
-            .product-name {
-                font-weight: 500;
-                color: #000000;
-            }
-            .product-quantity {
-                background-color: #000000;
-                color: white;
-                padding: 4px 8px;
-                border-radius: 12px;
-                font-size: 12px;
-                font-weight: 500;
-            }
             .footer {
                 background-color: #f8f9fa;
                 padding: 30px 40px;
                 text-align: center;
                 border-top: 1px solid #e9ecef;
-            }
-            .footer p {
-                margin: 5px 0;
-                font-size: 14px;
-                color: #6c757d;
-            }
-            .divider {
-                height: 1px;
-                background: linear-gradient(to right, transparent, #e9ecef, transparent);
-                margin: 30px 0;
-            }
-            @media (max-width: 600px) {
-                .email-container {
-                    width: 100% !important;
-                }
-                .header, .content, .footer {
-                    padding: 20px !important;
-                }
-                .header h1 {
-                    font-size: 24px;
-                }
-                .content h2 {
-                    font-size: 20px;
-                }
             }
         </style>
     </head>
@@ -1190,6 +868,42 @@ function createEmailTemplate(content, title = "EverBlack Store") {
         </div>
     </body>
     </html>
+    `;
+}
+
+/**
+ * Crea template de email para OXXO
+ */
+function createOxxoEmailTemplate(voucher_url, expire_date) {
+    return `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <div style="background: #000; color: white; padding: 20px; text-align: center;">
+                <h1>🏪 Tu pago OXXO está listo</h1>
+            </div>
+            <div style="padding: 20px;">
+                <h2>Instrucciones de pago:</h2>
+                <ol>
+                    <li><strong>Descarga tu comprobante</strong> haciendo clic en el botón de abajo</li>
+                    <li><strong>Ve a cualquier tienda OXXO</strong></li>
+                    <li><strong>Presenta el comprobante</strong> en caja</li>
+                    <li><strong>Realiza el pago</strong> en efectivo</li>
+                    <li><strong>¡Listo!</strong> Recibirás confirmación automática</li>
+                </ol>
+                
+                <div style="text-align: center; margin: 30px 0;">
+                    <a href="${voucher_url}" style="background: #ff6600; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                        📄 Descargar Comprobante OXXO
+                    </a>
+                </div>
+                
+                <div style="background: #fff3cd; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                    <strong>⚠️ Fecha límite:</strong> ${expire_date}<br>
+                    Si no pagas antes de esta fecha, tu pedido será cancelado.
+                </div>
+                
+                <p><strong>Gracias por elegir EverBlack Store 🖤</strong></p>
+            </div>
+        </div>
     `;
 }
 
@@ -1288,10 +1002,12 @@ async function sendEmailConfirmation(name, email, strapi, products, mainMessage,
     const productsList = products.map(product => `
         <div class="product-item">
             <div>
-                <div class="product-name">${product.product_name}</div>
+                <div class="product-name">${product.product_name || product.slug}</div>
                 ${product.size ? `<div style="font-size: 14px; color: #666;">Talla: ${product.size}</div>` : ''}
             </div>
-            <div class="product-quantity">${product.stockSelected || 1}</div>
+            <div>
+                <span class="product-quantity">${product.stockSelected || product.quantity || 1}</span>
+            </div>
         </div>
     `).join('');
 
@@ -1408,65 +1124,89 @@ async function sendEmailConfirmation(name, email, strapi, products, mainMessage,
 }
 
 /**
- * Envía email de confirmación de compra con diseño profesional
+ * Envía email de confirmación de compra con diseño profesional y rate limiting
  */
 async function sendOrderConfirmationEmail(customerName, email, strapi, products, subject = "¡Compra confirmada!", paymentMethod = 'card', isAsyncPayment = false) {
+    if (!email || !products || products.length === 0) {
+        console.error("Datos incompletos para email de confirmación:", {
+            email: !!email,
+            products: products?.length || 0,
+            name: !!customerName
+        });
+        return;
+    }
+
+    const customerDisplayName = customerName || 'Cliente';
+    const totalProducts = products.reduce((sum, product) => sum + (product.stockSelected || 1), 0);
+    
+    // Generar lista de productos con diseño mejorado
     const productsList = products.map(product => `
-        <div class="product-item">
+        <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #e9ecef;">
             <div>
-                <div class="product-name">${product.product_name || product.slug}</div>
-                ${product.slug_variant ? `<div style="color: #666; font-size: 14px;">Variante: ${product.slug_variant}</div>` : ''}
+                <div style="font-weight: 500; color: #000000;">${product.product_name}</div>
+                ${product.size ? `<div style="font-size: 14px; color: #666;">Talla: ${product.size}</div>` : ''}
             </div>
-            <div>
-                <span class="product-quantity">${product.stockSelected || product.quantity || 1}</span>
-            </div>
+            <div style="background-color: #000000; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 500;">${product.stockSelected || 1}</div>
         </div>
     `).join('');
 
-    const paymentMethodText = {
-        'card': '💳 Tarjeta de Crédito/Débito',
-        'oxxo': '🏪 OXXO',
-        'free': '🎁 Orden Gratuita',
-        'spei': '🏦 Transferencia SPEI'
-    }[paymentMethod] || '💳 Pago en línea';
+    // Generar contenido según el tipo de pago
+    let statusIcon = '✅';
+    let statusMessage = '';
+    let alertType = 'success';
 
-    const asyncText = isAsyncPayment ? `
-        <div class="alert success">
-            <strong>✅ Tu pago se acreditó exitosamente</strong><br>
-            Recibimos la confirmación de tu pago ${paymentMethodText.toLowerCase()}.
-        </div>
-    ` : '';
+    if (paymentMethod === 'oxxo' && isAsyncPayment) {
+        statusIcon = '🏪';
+        statusMessage = 'Tu pago OXXO fue acreditado exitosamente';
+        alertType = 'success';
+    } else if (paymentMethod === 'oxxo') {
+        statusIcon = '⏳';
+        statusMessage = 'Tu pedido está confirmado, pendiente de pago OXXO';
+        alertType = 'warning';
+    } else {
+        statusMessage = isAsyncPayment ? 'Tu pago fue procesado exitosamente' : 'Tu compra fue procesada exitosamente';
+    }
 
     const content = `
-        <div class="alert success">
-            <strong>🎉 ¡Tu compra ha sido confirmada!</strong>
+        <div style="text-align: center; margin-bottom: 30px;">
+            <h2 style="color: #000000; font-size: 28px; margin: 0;">${statusIcon} ${subject}</h2>
         </div>
 
-        <p>Hola <strong>${customerName}</strong>,</p>
-        
-        <p>Nos complace confirmar que hemos recibido tu pedido exitosamente.</p>
-
-        ${asyncText}
-
-        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="color: #000; margin-top: 0;">📦 Detalles del Pedido</h3>
-            <p><strong>Método de Pago:</strong> ${paymentMethodText}</p>
-            <p><strong>Estado:</strong> ${isAsyncPayment ? 'Pago Confirmado ✅' : 'Procesando'}</p>
+        <div style="background-color: ${alertType === 'success' ? '#d4edda' : '#fff3cd'}; 
+                    border: 1px solid ${alertType === 'success' ? '#c3e6cb' : '#ffeaa7'}; 
+                    border-radius: 5px; padding: 20px; margin: 20px 0; 
+                    color: ${alertType === 'success' ? '#155724' : '#856404'};">
+            <strong>${statusMessage}</strong>
         </div>
 
-        <div class="products-list">
-            <h3 style="margin-top: 0; color: #000;">🛍️ Productos Pedidos</h3>
+        <p>Hola <strong>${customerDisplayName}</strong>,</p>
+        <p>Tu pedido ha sido ${paymentMethod === 'oxxo' && !isAsyncPayment ? 'registrado' : 'confirmado'} exitosamente.</p>
+
+        <div style="background-color: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px 0;">
+            <h3 style="color: #000000; margin-top: 0;">📦 Productos de tu pedido (${totalProducts} ${totalProducts === 1 ? 'artículo' : 'artículos'})</h3>
             ${productsList}
         </div>
 
-        <div class="alert info">
-            <strong>📧 Próximos pasos:</strong><br>
-            • Recibirás un email con el número de seguimiento una vez que tu pedido sea enviado<br>
-            • Si tienes preguntas, puedes contactarnos respondiendo a este email
-        </div>
+        ${paymentMethod === 'oxxo' && !isAsyncPayment ? `
+            <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <strong>⚠️ Pendiente de pago OXXO</strong><br>
+                Tu pedido será procesado una vez que completes el pago en OXXO. 
+                Revisa tu email para el comprobante de pago.
+            </div>
+        ` : `
+            <div style="background-color: #d4edda; border-left: 4px solid #28a745; padding: 15px; margin: 20px 0; border-radius: 5px;">
+                <strong>✅ ¿Qué sigue?</strong><br>
+                Nuestro equipo preparará tu pedido y te notificaremos cuando esté listo para envío.
+            </div>
+        `}
 
         <div style="text-align: center; margin: 30px 0;">
-            <p style="font-size: 16px; color: #000;"><strong>Gracias por elegir EverBlack Store 🖤</strong></p>
+            <p style="font-size: 18px; color: #000000; margin: 10px 0;">
+                <strong>¡Gracias por elegir EverBlack Store! 🖤</strong>
+            </p>
+            <p style="font-size: 14px; color: #666;">
+                Cualquier duda, responde a este email o contáctanos
+            </p>
         </div>
     `;
 
@@ -1480,7 +1220,7 @@ async function sendOrderConfirmationEmail(customerName, email, strapi, products,
             subject: subject,
             html: createEmailTemplate(content, "Confirmación de Compra - EverBlack Store"),
         });
-        console.log(`Email de confirmación enviado exitosamente a: ${email} (${paymentMethod})`);
+        console.log(`Email de confirmación enviado exitosamente a: ${email}`);
     } catch (error) {
         console.error(`Error enviando email de confirmación a ${email}:`, error);
         throw error;
@@ -1488,553 +1228,365 @@ async function sendOrderConfirmationEmail(customerName, email, strapi, products,
 }
 
 /**
- * Envía email con voucher de pago OXXO
+ * Actualiza el stock de productos (suma o resta)
  */
-async function sendOXXOVoucherEmail(email, strapi, subject, voucher_url, expire_date) {
-    console.log(`=== ENVIANDO EMAIL OXXO ===`);
-    console.log(`Email destinatario: ${email}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Voucher URL: ${voucher_url}`);
-    console.log(`Fecha expiración: ${expire_date}`);
-    
-    const content = `
-        <div class="alert warning">
-            <strong>🏪 Tu pago OXXO está listo</strong>
-        </div>
-
-        <p>Hola,</p>
-        
-        <p>Tu pedido está confirmado, pero <strong>requiere que completes el pago en OXXO</strong> para ser procesado.</p>
-
-        <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 20px; margin: 20px 0;">
-            <h3 style="color: #856404; margin-top: 0;">📋 Instrucciones de Pago</h3>
-            <p style="color: #856404;"><strong>1.</strong> Haz clic en el botón de abajo para descargar tu comprobante</p>
-            <p style="color: #856404;"><strong>2.</strong> Ve a cualquier tienda OXXO</p>
-            <p style="color: #856404;"><strong>3.</strong> Presenta el comprobante en caja</p>
-            <p style="color: #856404;"><strong>4.</strong> Realiza el pago</p>
-        </div>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <a href="${voucher_url}" class="button" style="font-size: 18px; padding: 20px 40px;">
-                📄 Descargar Comprobante OXXO
-            </a>
-        </div>
-
-        <div class="alert warning">
-            <strong>⚠️ Fecha límite de pago:</strong> ${expire_date}<br>
-            Si no realizas el pago antes de esta fecha, tu pedido será cancelado automáticamente.
-        </div>
-
-        <div class="alert info">
-            <strong>💡 Consejos importantes:</strong><br>
-            • Guarda este email hasta completar tu pago<br>
-            • El comprobante es único para tu pedido<br>
-            • Una vez pagado, recibirás confirmación por email<br>
-            • Si tienes dudas, contáctanos
-        </div>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <p style="font-size: 16px; color: #000;"><strong>Gracias por elegir EverBlack Store 🖤</strong></p>
-        </div>
-    `;
-
-    try {
-        // Verificar que el plugin de email esté disponible
-        if (!strapi.plugins['email'] || !strapi.plugins['email'].services || !strapi.plugins['email'].services.email) {
-            throw new Error('Plugin de email no está disponible o configurado correctamente');
-        }
-
-        console.log('=== CONFIGURACIÓN EMAIL ===');
-        console.log('Plugin email disponible:', !!strapi.plugins['email']);
-        console.log('Servicio email disponible:', !!strapi.plugins['email']?.services?.email);
-        console.log('RESEND_API_KEY configurado:', !!process.env.RESEND_API_KEY);
-
-        const emailConfig = {
-            to: email,
-            from: "noreply@everblack.store",
-            cc: "info@everblack.store",
-            bcc: "ventas@everblack.store",
-            replyTo: "info@everblack.store",
-            subject: subject,
-            html: createEmailTemplate(content, "Pago OXXO Requerido - EverBlack Store"),
-        };
-
-        console.log('=== ENVIANDO EMAIL ===');
-        console.log('Configuración email:', JSON.stringify(emailConfig, null, 2));
-
-        await strapi.plugins['email'].services.email.send(emailConfig);
-        console.log(`✅ Email OXXO enviado exitosamente a: ${email}`);
-    } catch (error) {
-        console.error(`❌ Error enviando email OXXO a ${email}:`, error);
-        
-        // Log más detallado del error
-        if (error.response) {
-            console.error('Error response:', {
-                status: error.response.status,
-                statusText: error.response.statusText,
-                data: error.response.data
-            });
-        }
-        
-        if (error.request) {
-            console.error('Error request:', error.request);
-        }
-        
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        
-        // Re-lanzar solo si es un error crítico, pero no para errores de configuración de email
-        if (error.message.includes('Plugin de email no está disponible')) {
-            console.warn('Plugin de email no configurado - continuando sin enviar email');
-        } else {
-            throw error;
-        }
-    }
-}
-
-/**
- * Envía email de pedido pendiente de pago
- */
-async function sendPendingPaymentEmail(customerName, email, strapi, products, paymentMethod = 'card') {
-    const productsList = products.map(product => `
-        <div class="product-item">
-            <div>
-                <div class="product-name">${product.product_name || product.slug}</div>
-                ${product.slug_variant ? `<div style="color: #666; font-size: 14px;">Variante: ${product.slug_variant}</div>` : ''}
-            </div>
-            <div>
-                <span class="product-quantity">${product.stockSelected || product.quantity || 1}</span>
-            </div>
-        </div>
-    `).join('');
-
-    const paymentMethodText = {
-        'card': '💳 Tarjeta de Crédito/Débito',
-        'oxxo': '🏪 OXXO',
-        'spei': '🏦 Transferencia SPEI'
-    }[paymentMethod] || '💳 Pago en línea';
-
-    const paymentInstructions = paymentMethod === 'oxxo' 
-        ? `<div class="alert warning">
-            <strong>🏪 Instrucciones para OXXO:</strong><br>
-            • Ve a cualquier tienda OXXO con tu comprobante<br>
-            • Presenta el código en caja<br>
-            • Realiza el pago<br>
-            • Recibirás confirmación automática por email
-        </div>`
-        : `<div class="alert info">
-            <strong>💳 Completar pago:</strong><br>
-            • Tu pago está siendo procesado<br>
-            • Recibirás confirmación una vez acreditado<br>
-            • Si hay algún problema, te contactaremos
-        </div>`;
-
-    const content = `
-        <div class="alert warning">
-            <strong>⏳ Tu pedido está pendiente de pago</strong>
-        </div>
-
-        <p>Hola <strong>${customerName}</strong>,</p>
-        
-        <p>Hemos recibido tu pedido, pero está <strong>pendiente de confirmación de pago</strong>.</p>
-
-        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 8px; margin: 20px 0;">
-            <h3 style="color: #000; margin-top: 0;">📦 Detalles del Pedido</h3>
-            <p><strong>Método de Pago:</strong> ${paymentMethodText}</p>
-            <p><strong>Estado:</strong> Pendiente de Pago</p>
-        </div>
-
-        <div class="products-list">
-            <h3 style="margin-top: 0; color: #000;">🛍️ Productos Reservados</h3>
-            ${productsList}
-        </div>
-
-        ${paymentInstructions}
-
-        <div class="alert info">
-            <strong>📧 ¿Qué sigue?</strong><br>
-            • Una vez confirmado el pago, procesaremos tu pedido inmediatamente<br>
-            • Te enviaremos la confirmación y número de seguimiento<br>
-            • Si tienes preguntas, no dudes en contactarnos
-        </div>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <p style="font-size: 16px; color: #000;"><strong>Gracias por elegir EverBlack Store 🖤</strong></p>
-        </div>
-    `;
-
-    try {
-        await strapi.plugins['email'].services.email.send({
-            to: email,
-            from: "noreply@everblack.store",
-            cc: "info@everblack.store",
-            bcc: "ventas@everblack.store",
-            replyTo: "info@everblack.store",
-            subject: "Pedido Pendiente de Pago - EverBlack Store",
-            html: createEmailTemplate(content, "Pedido Pendiente - EverBlack Store"),
-        });
-        console.log(`Email de pedido pendiente enviado exitosamente a: ${email} (${paymentMethod})`);
-    } catch (error) {
-        console.error(`Error enviando email de pedido pendiente a ${email}:`, error);
-        throw error;
-    }
-}
-
-/**
- * Email para notificar que el pedido está pendiente de acreditación de pago
- */
-async function sendEmailPendingPayment(name, email, strapi, products, paymentMethod = 'oxxo') {
-    if (!email || !products || products.length === 0) {
-        console.error("Datos incompletos para email de pedido pendiente:", {
-            email: !!email,
-            products: products?.length || 0,
-            name: !!name
-        });
-        return;
-    }
-
-    const customerName = name || 'Cliente';
-    const totalProducts = products.reduce((sum, product) => sum + (product.stockSelected || 1), 0);
-    
-    // Generar lista de productos
-    const productsList = products.map(product => `
-        <div class="product-item">
-            <div>
-                <div class="product-name">${product.product_name}</div>
-                ${product.size ? `<div style="font-size: 14px; color: #666;">Talla: ${product.size}</div>` : ''}
-            </div>
-            <div class="product-quantity">${product.stockSelected || 1}</div>
-        </div>
-    `).join('');
-
-    let subject = '';
-    let statusIcon = '';
-    let statusMessage = '';
-    let timeMessage = '';
-    
-    if (paymentMethod === 'oxxo') {
-        subject = "⏳ Pedido registrado - Esperando confirmación de pago OXXO";
-        statusIcon = '⏳';
-        statusMessage = 'Hemos registrado tu pedido y estamos esperando la confirmación de tu pago OXXO';
-        timeMessage = 'Los pagos OXXO pueden tardar hasta 24 horas en acreditarse';
-    } else {
-        subject = "⏳ Pedido registrado - Esperando confirmación de pago";
-        statusIcon = '⏳';
-        statusMessage = 'Tu pedido ha sido registrado y estamos esperando la confirmación del pago';
-        timeMessage = 'Te notificaremos tan pronto como se confirme el pago';
-    }
-
-    const content = `
-        <h2>${statusIcon} Tu pedido está siendo procesado</h2>
-        <p>Hola <strong>${customerName}</strong>,</p>
-        <p>${statusMessage}</p>
-        
-        <div class="alert warning">
-            <strong>Estado actual:</strong> Esperando confirmación de pago 💳<br>
-            <strong>Método de pago:</strong> ${paymentMethod.toUpperCase()}<br>
-            <strong>Tiempo estimado:</strong> ${timeMessage}
-        </div>
-
-        <div class="divider"></div>
-        
-        <h3 style="color: #000; margin-bottom: 20px;">📋 Resumen de tu pedido</h3>
-        <div class="products-list">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 2px solid #dee2e6;">
-                <strong style="color: #000;">Productos (${totalProducts} ${totalProducts === 1 ? 'artículo' : 'artículos'})</strong>
-                <strong style="color: #000;">Cantidad</strong>
-            </div>
-            ${productsList}
-        </div>
-
-        <div class="alert info">
-            <strong>📱 ¿Qué sigue?</strong><br>
-            1. Confirmaremos tu pago automáticamente<br>
-            2. Te enviaremos un email de confirmación<br>
-            3. Procederemos a preparar tu pedido para envío
-        </div>
-
-        <div class="divider"></div>
-        
-        <h3 style="color: #000;">📞 ¿Tienes dudas?</h3>
-        <p>Si tienes alguna pregunta sobre tu pedido o el proceso de pago:</p>
-        <ul style="color: #555;">
-            <li>📧 Email: <a href="mailto:info@everblack.store" style="color: #000;">info@everblack.store</a></li>
-            <li>📧 Ventas: <a href="mailto:ventas@everblack.store" style="color: #000;">ventas@everblack.store</a></li>
-        </ul>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <p style="font-size: 16px; color: #666;">Gracias por tu paciencia mientras procesamos tu pago 🖤</p>
-        </div>
-    `;
-
-    try {
-        await strapi.plugins['email'].services.email.send({
-            to: email,
-            from: "noreply@everblack.store",
-            cc: "info@everblack.store",
-            bcc: "ventas@everblack.store",
-            replyTo: "info@everblack.store",
-            subject: subject,
-            html: createEmailTemplate(content, "Pedido Pendiente - EverBlack Store"),
-        });
-        console.log(`Email de pedido pendiente enviado exitosamente a: ${email} (${paymentMethod})`);
-    } catch (error) {
-        console.error(`Error enviando email de pedido pendiente a ${email}:`, error);
-        throw error;
-    }
-}
-
-/**
- * Email para actualizaciones de seguimiento del pedido (envío, entrega, etc.)
- */
-async function sendEmailOrderUpdate(name, email, strapi, orderId, status, trackingInfo = null) {
-    if (!email || !orderId || !status) {
-        console.error("Datos incompletos para email de actualización:", {
-            email: !!email,
-            orderId: !!orderId,
-            status: !!status
-        });
-        return;
-    }
-
-    const customerName = name || 'Cliente';
-    let subject = '';
-    let statusIcon = '';
-    let mainMessage = '';
-    let alertType = 'info';
-    let additionalContent = '';
-
-    switch (status) {
-        case 'shipped':
-            subject = "📦 ¡Tu pedido está en camino!";
-            statusIcon = '🚚';
-            mainMessage = 'Tu pedido ha sido enviado y está en camino hacia ti';
-            alertType = 'success';
-            additionalContent = trackingInfo ? `
-                <div class="alert info">
-                    <strong>📍 Información de seguimiento:</strong><br>
-                    <strong>Número de guía:</strong> ${trackingInfo.trackingNumber || 'Por asignar'}<br>
-                    <strong>Paquetería:</strong> ${trackingInfo.carrier || 'Por confirmar'}<br>
-                    <strong>Tiempo estimado:</strong> ${trackingInfo.estimatedDays || '2-5'} días hábiles
-                </div>
-                ${trackingInfo.trackingUrl ? `
-                <div style="text-align: center; margin: 20px 0;">
-                    <a href="${trackingInfo.trackingUrl}" class="button">
-                        📍 Rastrear mi pedido
-                    </a>
-                </div>
-                ` : ''}
-            ` : '';
-            break;
-
-        case 'delivered':
-            subject = "✅ ¡Tu pedido ha sido entregado!";
-            statusIcon = '🎉';
-            mainMessage = '¡Excelente! Tu pedido ha sido entregado exitosamente';
-            alertType = 'success';
-            additionalContent = `
-                <div class="alert success">
-                    <strong>🎯 ¡Entrega confirmada!</strong><br>
-                    Tu pedido fue entregado en la dirección especificada.<br>
-                    Esperamos que disfrutes tus productos EverBlack.
-                </div>
-                <div style="text-align: center; margin: 30px 0;">
-                    <p style="font-size: 16px; color: #000;">
-                        <strong>¿Te gustó tu experiencia? 🖤</strong><br>
-                        <span style="color: #666;">Nos encantaría conocer tu opinión</span>
-                    </p>
-                </div>
-            `;
-            break;
-
-        case 'processing':
-            subject = "🔄 Tu pedido está siendo preparado";
-            statusIcon = '⚙️';
-            mainMessage = 'Estamos preparando tu pedido con mucho cuidado';
-            alertType = 'info';
-            additionalContent = `
-                <div class="alert info">
-                    <strong>📦 Estado actual:</strong> Preparando pedido<br>
-                    <strong>⏱️ Tiempo estimado:</strong> 24-48 horas<br>
-                    <strong>📧 Siguiente actualización:</strong> Notificación de envío
-                </div>
-            `;
-            break;
-
-        case 'cancelled':
-            subject = "❌ Tu pedido ha sido cancelado";
-            statusIcon = '❌';
-            mainMessage = 'Tu pedido ha sido cancelado';
-            alertType = 'warning';
-            additionalContent = `
-                <div class="alert warning">
-                    <strong>🔄 Reembolso:</strong> Si ya realizaste el pago, será reembolsado automáticamente<br>
-                    <strong>⏱️ Tiempo de reembolso:</strong> 5-10 días hábiles<br>
-                    <strong>📧 Dudas:</strong> Contáctanos si necesitas más información
-                </div>
-            `;
-            break;
-
-        default:
-            subject = "📋 Actualización de tu pedido";
-            statusIcon = '📋';
-            mainMessage = `Tu pedido ha sido actualizado - Estado: ${status}`;
-            alertType = 'info';
-    }
-
-    const content = `
-        <h2>${statusIcon} ${subject.replace(/^[^\s]+ /, '')}</h2>
-        <p>Hola <strong>${customerName}</strong>,</p>
-        <p>${mainMessage}</p>
-        
-        <div class="alert ${alertType}">
-            <strong>Número de pedido:</strong> #${orderId}<br>
-            <strong>Estado actual:</strong> ${status.charAt(0).toUpperCase() + status.slice(1)}<br>
-            <strong>Fecha de actualización:</strong> ${new Date().toLocaleDateString('es-ES', {
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-            })}
-        </div>
-
-        ${additionalContent}
-
-        <div class="divider"></div>
-        
-        <h3 style="color: #000;">📞 ¿Necesitas ayuda?</h3>
-        <p>Si tienes alguna pregunta sobre tu pedido:</p>
-        <ul style="color: #555;">
-            <li>📧 Email: <a href="mailto:info@everblack.store" style="color: #000;">info@everblack.store</a></li>
-            <li>📧 Ventas: <a href="mailto:ventas@everblack.store" style="color: #000;">ventas@everblack.store</a></li>
-        </ul>
-
-        <div style="text-align: center; margin: 30px 0;">
-            <p style="font-size: 16px; color: #000;"><strong>Gracias por elegir EverBlack Store 🖤</strong></p>
-        </div>
-    `;
-
-    try {
-        await strapi.plugins['email'].services.email.send({
-            to: email,
-            from: "noreply@everblack.store",
-            cc: "info@everblack.store",
-            bcc: "ventas@everblack.store",
-            replyTo: "info@everblack.store",
-            subject: subject,
-            html: createEmailTemplate(content, "Actualización de Pedido - EverBlack Store"),
-        });
-        console.log(`Email de actualización enviado exitosamente a: ${email} (${status})`);
-    } catch (error) {
-        console.error(`Error enviando email de actualización a ${email}:`, error);
-        throw error;
-    }
-}
-
-// Función obsoleta - removida en favor de updateOrderStatusOptimized
-// async function updateOrderPaymentMethod(paymentData, async_payment = false) {
-//     // Lógica movida a updateOrderStatusOptimized para mejor control de estados
-// }
-
-/**
- * Actualización optimizada de stock con validación mejorada
- */
-async function updateStockProducts(products, action) {
-    if (!products || !Array.isArray(products) || products.length === 0) {
+async function updateStockProducts(products, operation = "minus") {
+    if (!products || products.length === 0) {
         console.log("No hay productos para actualizar stock");
         return;
     }
 
-    console.log(`Actualizando stock de ${products.length} productos - Acción: ${action}`);
-    
-    const errors = [];
-    const updated = [];
+    console.log(`Actualizando stock de ${products.length} productos - Operación: ${operation}`);
 
     for (const product of products) {
         try {
-            const { slug_variant, stockSelected, slug, product_name } = product;
-            
-            if (!stockSelected || stockSelected <= 0) {
-                console.warn(`Stock inválido para producto ${product_name}: ${stockSelected}`);
-                continue;
-            }
+            const { slug_variant, stockSelected, productId } = product;
+            const stockAmount = stockSelected || 1;
 
             if (slug_variant) {
-                // Producto con variante
-                const variants = await strapi.entityService.findMany('api::variation.variation', {
+                // Buscar la variante del producto
+                const [variantData] = await strapi.entityService.findMany('api::variation.variation', {
                     filters: { slug: slug_variant },
                     limit: 1,
                 });
 
-                if (variants.length === 0) {
-                    errors.push(`Variante no encontrada: ${slug_variant}`);
+                if (!variantData) {
+                    console.error(`La variante "${slug_variant}" no existe para el producto.`);
                     continue;
                 }
 
-                const variant = variants[0];
-                const newStock = action === "minus" 
-                    ? Math.max(0, variant.stock - stockSelected)
-                    : variant.stock + stockSelected;
-                
-                const newUnitsSold = action === "minus"
-                    ? variant.units_sold + stockSelected
-                    : Math.max(0, variant.units_sold - stockSelected);
+                // Calcular nuevo stock
+                const currentStock = variantData.stock || 0;
+                const newStock = operation === "minus" 
+                    ? Math.max(0, currentStock - stockAmount)
+                    : currentStock + stockAmount;
 
-                await strapi.entityService.update('api::variation.variation', variant.id, {
-                    data: {
-                        stock: newStock,
-                        units_sold: newUnitsSold,
-                        last_updated: new Date()
-                    },
+                // Actualizar stock de la variante
+                await strapi.entityService.update('api::variation.variation', variantData.id, {
+                    data: { stock: newStock },
                 });
 
-                updated.push(`Variante ${slug_variant}: stock ${variant.stock} -> ${newStock}`);
+                console.log(`Stock variante ${slug_variant}: ${currentStock} -> ${newStock} (${operation} ${stockAmount})`);
 
-            } else {
-                // Producto sin variante
-                const mainProducts = await strapi.entityService.findMany('api::product.product', {
-                    filters: { slug: slug },
+            } else if (productId) {
+                // Buscar el producto principal
+                const [productData] = await strapi.entityService.findMany('api::product.product', {
+                    filters: { slug: productId },
                     limit: 1,
                 });
 
-                if (mainProducts.length === 0) {
-                    errors.push(`Producto no encontrado: ${slug}`);
+                if (!productData) {
+                    console.error(`El producto "${productId}" no existe.`);
                     continue;
                 }
 
-                const mainProduct = mainProducts[0];
-                const newStock = action === "minus"
-                    ? Math.max(0, mainProduct.stock - stockSelected)
-                    : mainProduct.stock + stockSelected;
-                
-                const newUnitsSold = action === "minus"
-                    ? mainProduct.units_sold + stockSelected
-                    : Math.max(0, mainProduct.units_sold - stockSelected);
+                // Calcular nuevo stock
+                const currentStock = productData.stock || 0;
+                const newStock = operation === "minus" 
+                    ? Math.max(0, currentStock - stockAmount)
+                    : currentStock + stockAmount;
 
-                await strapi.entityService.update('api::product.product', mainProduct.id, {
-                    data: {
-                        stock: newStock,
-                        units_sold: newUnitsSold,
-                        last_updated: new Date()
-                    },
+                // Actualizar stock del producto
+                await strapi.entityService.update('api::product.product', productData.id, {
+                    data: { stock: newStock },
                 });
 
-                updated.push(`Producto ${slug}: stock ${mainProduct.stock} -> ${newStock}`);
+                console.log(`Stock producto ${productId}: ${currentStock} -> ${newStock} (${operation} ${stockAmount})`);
             }
 
         } catch (error) {
-            const errorMsg = `Error actualizando stock de ${product.product_name || product.slug}: ${error.message}`;
-            console.error(errorMsg);
-            errors.push(errorMsg);
+            console.error(`Error actualizando stock del producto:`, error);
+            // Continuar con el siguiente producto en caso de error
         }
-    }
-
-    if (updated.length > 0) {
-        console.log(`Stock actualizado exitosamente:\n${updated.join('\n')}`);
-    }
-
-    if (errors.length > 0) {
-        console.error(`Errores actualizando stock:\n${errors.join('\n')}`);
     }
 }
 
+/**
+ * Manejo optimizado de pagos OXXO con validación mejorada y rate limiting
+ */
+async function handleOxxoPaymentOptimized(paymentData) {
+    try {
+        console.log(`=== PROCESANDO PAGO OXXO ===`);
+        console.log(`Payment Intent ID: ${paymentData.id}`);
+        console.log(`Payment Intent Status: ${paymentData.status}`);
+        console.log(`Receipt Email: ${paymentData.receipt_email}`);
+        console.log(`Payment Method Types:`, paymentData.payment_method_types);
+        console.log(`Next Action:`, paymentData.next_action);
+        
+        const voucher_url = paymentData.next_action?.oxxo_display_details?.hosted_voucher_url;
+        const expire_days = paymentData.payment_method_options?.oxxo?.expires_after_days;
+        const receipt_email = paymentData.receipt_email;
+
+        console.log(`Voucher URL: ${voucher_url}`);
+        console.log(`Expire days: ${expire_days}`);
+        console.log(`Receipt email: ${receipt_email}`);
+
+        if (!voucher_url || !expire_days) {
+            console.error("❌ Datos incompletos para pago OXXO:", {
+                voucher_url: !!voucher_url,
+                expire_days: !!expire_days,
+                paymentIntentId: paymentData.id,
+                next_action: paymentData.next_action,
+                payment_method_options: paymentData.payment_method_options
+            });
+            return;
+        }
+
+        const expire_date = new Date(Date.now() + expire_days * 24 * 60 * 60 * 1000)
+            .toISOString().split('T')[0];
+
+        console.log(`Procesando pago OXXO para Payment Intent: ${paymentData.id}`);
+        console.log(`Voucher URL generado, expira: ${expire_date}`);
+
+        // Buscar la orden usando el payment intent ID
+        const orders = await strapi.entityService.findMany('api::order.order', {
+            filters: { stripe_id: paymentData.id },
+            limit: 1,
+        });
+
+        // Si no se encuentra por payment intent, buscar por checkout session
+        let order = null;
+        if (orders.length === 0) {
+            // Buscar usando metadata del payment intent
+            if (paymentData.metadata?.order_id) {
+                const ordersByOrderId = await strapi.entityService.findMany('api::order.order', {
+                    filters: { order_id: paymentData.metadata.order_id },
+                    limit: 1,
+                });
+                order = ordersByOrderId[0];
+            }
+        } else {
+            order = orders[0];
+        }
+
+        // Enviar email con voucher SOLO si hay email y aún no se ha enviado
+        if (receipt_email && order) {
+            try {
+                console.log(`🔄 Enviando email OXXO con rate limiting a: ${receipt_email}`);
+                
+                // Aplicar delay para evitar rate limiting
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                
+                const emailConfig = {
+                    to: receipt_email,
+                    from: "noreply@everblack.store",
+                    subject: "🏪 Tu ficha de pago OXXO - EverBlack Store",
+                    html: createOxxoEmailTemplate(voucher_url, expire_date)
+                };
+
+                // Intentar envío directo primero, si falla por rate limit, usar reintento
+                try {
+                    await strapi.plugins['email'].services.email.send(emailConfig);
+                    console.log(`✅ Email OXXO enviado exitosamente a: ${receipt_email}`);
+                } catch (directError) {
+                    if (directError.statusCode === 429) {
+                        console.log(`⏱️ Rate limit detectado, programando reintento en 3 segundos`);
+                        setTimeout(async () => {
+                            try {
+                                await strapi.plugins['email'].services.email.send(emailConfig);
+                                console.log(`✅ Email OXXO enviado exitosamente (reintento) a: ${receipt_email}`);
+                            } catch (retryError) {
+                                console.error(`❌ Error en reintento de email OXXO:`, retryError.message);
+                            }
+                        }, 3000);
+                    } else {
+                        throw directError;
+                    }
+                }
+                
+                // Marcar que el email fue enviado para evitar duplicados
+                if (order) {
+                    // Solo actualizar si es necesario, sin campos que no existen en el schema
+                    console.log(`Email OXXO procesado para orden ${order.id}`);
+                }
+                
+            } catch (emailError) {
+                console.error(`❌ Error enviando email OXXO a ${receipt_email}:`, emailError.message || emailError);
+                
+                // Si es rate limiting, programar reintento
+                if (emailError.statusCode === 429) {
+                    console.log(`⏱️ Rate limit detectado, programando reintento en 5 segundos`);                        setTimeout(async () => {
+                            try {
+                                const retryEmailConfig = {
+                                    to: receipt_email,
+                                    from: "noreply@everblack.store",
+                                    subject: "🏪 Tu ficha de pago OXXO - EverBlack Store",
+                                    html: createOxxoEmailTemplate(voucher_url, expire_date)
+                                };
+                                await strapi.plugins['email'].services.email.send(retryEmailConfig);
+                                console.log(`✅ Email OXXO enviado exitosamente (reintento) a: ${receipt_email}`);
+                            } catch (retryError) {
+                                console.error(`❌ Error en reintento de email OXXO:`, retryError.message);
+                            }
+                        }, 5000);
+                }
+            }
+        } else {
+            console.warn(`⚠️ No se puede enviar email OXXO - Email: ${!!receipt_email}, Orden encontrada: ${!!order}`);
+        }
+
+        // SOLO actualizar la fecha de última actualización, NO cambiar estado a completed
+        console.log(`🔄 Procesamiento OXXO completado para payment intent: ${paymentData.id}`);
+        if (order) {
+            console.log(`Orden ${order.id} procesada para OXXO`);
+        }
+        
+        console.log(`✅ Procesamiento OXXO completado para Payment Intent: ${paymentData.id}`);
+        
+    } catch (error) {
+        console.error(`❌ Error procesando pago OXXO para ${paymentData.id}:`, error);
+        throw error;
+    }
+}
+
+/**
+ * Fulfillment optimizado de checkout con validación mejorada
+ */
+async function fulfillCheckoutOptimized(sessionId, isAsyncPayment) {
+    try {
+        console.log(`Iniciando fulfillment para sesión: ${sessionId}, async: ${isAsyncPayment}`);
+        
+        // Retrieve the Checkout Session
+        const checkoutSession = await stripe.checkout.sessions.retrieve(sessionId, {
+            expand: ['line_items'],
+        });
+
+        const payment_intent_id = checkoutSession.payment_intent;
+
+        if (!payment_intent_id) {
+            console.error(`No se encontró payment_intent para sesión: ${sessionId}`);
+            return;
+        }
+
+        // Buscar Payment Intent en la base de datos
+        const paymentIntents = await strapi.entityService.findMany('api::payment-intent.payment-intent', {
+            filters: { paymentintent_id: payment_intent_id },
+            limit: 1,
+        });
+
+        // Buscar orden
+        const orders = await strapi.entityService.findMany('api::order.order', {
+            filters: { stripe_id: sessionId },
+            limit: 1,
+        });
+
+        if (orders.length === 0) {
+            console.error(`Orden no encontrada para sesión: ${sessionId}`);
+            return;
+        }
+
+        const order = orders[0];
+
+        // Para pagos OXXO, es normal que la sesión esté "unpaid" hasta completar el pago en tienda
+        const paymentMethodFromSession = checkoutSession.payment_method_types?.[0];
+        const isOxxoPayment = paymentMethodFromSession === 'oxxo' || 
+                              checkoutSession.payment_method_options?.oxxo ||
+                              order['payment_method'] === 'oxxo';
+
+        // Para OXXO, solo procesar como completado si realmente está pagado
+        if (isOxxoPayment) {
+            console.log(`Sesión OXXO ${sessionId}. Estado de pago: ${checkoutSession.payment_status}`);
+            
+            if (checkoutSession.payment_status !== 'paid') {
+                console.log(`Sesión OXXO no pagada - NO completando orden. Estado: ${checkoutSession.payment_status}`);
+                // Mantener orden pending sin actualizar campos inexistentes
+                console.log(`Manteniendo orden ${order.id} en estado pending para OXXO`);
+                return;
+            } else {
+                console.log(`Sesión OXXO completada y pagada - Procesando fulfillment`);
+            }
+        }
+
+        // Verificar estado de pago - Para otros métodos de pago
+        if (checkoutSession.payment_status !== 'paid' && !isOxxoPayment) {
+            console.log(`Sesión ${sessionId} no está pagada. Estado: ${checkoutSession.payment_status}`);
+            return;
+        }
+
+        // Evitar procesar la misma orden múltiples veces
+        if (order.order_status === 'completed' && order['payment_credited']) {
+            console.log(`Orden ${order.id} ya fue completada previamente`);
+            return;
+        }
+
+        console.log(`Completando orden ${order.id} para sesión ${sessionId}`);
+
+        // Actualizar orden como completada
+        const updateData = {
+            shipping_status: 'pending',
+            order_status: 'completed',
+            payment_credited: true,
+            order_canceled: false,
+            refund_requested: false,
+            order_date: new Date(),
+            last_updated: new Date(),
+            payment_method: order['payment_method'] || paymentMethodFromSession || 'card'
+        };
+
+        // Guardar datos del cliente si están disponibles
+        const { name: customerName, email: customerEmail } = checkoutSession.customer_details || {};
+        if (customerName) updateData.customer_name = customerName;
+        if (customerEmail) updateData.customer_email = customerEmail;
+
+        // Vincular con Payment Intent si existe
+        if (paymentIntents.length > 0) {
+            updateData.payment_intent = paymentIntents[0].id;
+        }
+
+        await strapi.entityService.update('api::order.order', order.id, {
+            data: updateData
+        });
+
+        console.log(`Orden ${order.id} completada exitosamente`);
+
+        // Enviar email de confirmación con delay para evitar rate limiting
+        const { name: emailCustomerName, email: emailCustomerEmail } = checkoutSession.customer_details || {};
+        if (emailCustomerEmail && order.products) {
+            try {
+                // Delay para evitar rate limiting
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                // Detectar tipo de pago
+                const paymentMethod = updateData.payment_method || 'card';
+                
+                await sendOrderConfirmationEmail(
+                    emailCustomerName || order['customer_name'] || 'Cliente', 
+                    emailCustomerEmail, 
+                    strapi, 
+                    order.products, 
+                    isAsyncPayment ? "¡Compra confirmada! Tu pago se acreditó con éxito" : "¡Compra confirmada!",
+                    paymentMethod,
+                    isAsyncPayment
+                );
+                console.log(`Email de confirmación enviado a: ${emailCustomerEmail} (${paymentMethod}, async: ${isAsyncPayment})`);
+            } catch (emailError) {
+                console.error(`Error enviando email de confirmación:`, emailError);
+                // No lanzar error - la orden ya fue procesada
+            }
+        }
+
+    } catch (error) {
+        console.error(`Error en fulfillment para sesión ${sessionId}:`, error);
+        
+        // Marcar orden como fallida en caso de error crítico
+        try {
+            const orders = await strapi.entityService.findMany('api::order.order', {
+                filters: { stripe_id: sessionId },
+                limit: 1,
+            });
+            
+            if (orders.length > 0) {
+                await strapi.entityService.update('api::order.order', orders[0].id, {
+                    data: { 
+                        order_status: 'failed',
+                        last_updated: new Date()
+                    }
+                });
+            }
+        } catch (updateError) {
+            console.error(`Error actualizando orden a fallida:`, updateError);
+        }
+        
+        throw error;
+    }
+}

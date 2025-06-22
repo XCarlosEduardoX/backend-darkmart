@@ -9,5 +9,14 @@ module.exports = {
         middlewares: [], // Middlewares opcionales
       },
     },
+    {
+      method: 'GET', // Método de la solicitud
+      path: '/check-stock/diagnose', // Ruta del endpoint de diagnóstico
+      handler: 'check-stock.diagnoseDatabase', // Método de diagnóstico
+      config: {
+        policies: [], // Políticas opcionales
+        middlewares: [], // Middlewares opcionales
+      },
+    },
   ],
 };
