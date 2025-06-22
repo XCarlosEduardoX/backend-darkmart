@@ -76,5 +76,6 @@ module.exports = {
         // Asegúrate de que esto esté en `false` si no necesitas autenticación
       },
     },
+    
   ],
 };

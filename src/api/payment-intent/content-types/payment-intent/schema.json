@@ -33,6 +33,9 @@
     "waiting_payment_accreditation": {
       "type": "boolean",
       "default": false
+    },
+    "last4": {
+      "type": "string"
     }
   }
 }
