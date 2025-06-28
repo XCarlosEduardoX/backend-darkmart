@@ -1,4 +1,5 @@
 module.exports = [
+ 
   'strapi::errors',
   {
     name: 'strapi::security',
@@ -32,6 +33,7 @@ module.exports = [
   'strapi::session',
   'strapi::favicon',
   'strapi::public',
+  // Agregar el middleware personalizado para manejar problemas de privacidad
   'strapi::cors',
 
   // {

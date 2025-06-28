@@ -158,9 +158,12 @@ module.exports = (plugin) => {
     }
 
     try {
-      const userProfile = await strapi.query('plugin::users-permissions.user').findOne({
-        where: { id: user.id },
-        populate: ['role']
+      const userProfile = await strapi.entityService.findOne('plugin::users-permissions.user', user.id, {
+        populate: {
+          role: {
+            fields: ['id', 'name', 'type', 'description']
+          }
+        }
       });
 
       const { password, resetPasswordToken, confirmationToken, ...sanitizedUser } = userProfile;

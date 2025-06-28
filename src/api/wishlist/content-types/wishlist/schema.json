@@ -20,6 +20,10 @@
     "identifier": {
       "type": "uid"
     },
+    "wishlist_identifier_user": {
+      "type": "string",
+      "required": false
+    },
     "product": {
       "type": "relation",
       "relation": "oneToOne",
