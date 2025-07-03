@@ -7,6 +7,24 @@ module.exports = {
   routes: [
     {
       method: 'POST',
+      path: '/orders/calculate', // Nueva ruta para calcular totales
+      handler: 'calculate-order.calculateOrder',
+      config: {
+        auth: false, // Hacer pública temporalmente
+        policies: [],
+      },
+    },
+    {
+      method: 'POST',
+      path: '/orders/secure', // Nueva ruta para crear órdenes seguras
+      handler: 'order.createSecure',
+      config: {
+        auth: false, // Hacer pública temporalmente
+        policies: [],
+      },
+    },
+    {
+      method: 'POST',
       path: '/orders', // Ruta para crear pedidos
       handler: 'order.create',
       config: {

@@ -5,11 +5,18 @@ const stripe = require('stripe')(process.env.STRIPE_KEY);
 const { v4: uuidv4 } = require('uuid');
 const { createCoreController } = require('@strapi/strapi').factories;
 const generateUniqueID = require('../../../scripts/generateUniqueID');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
 
 
 const retryQueue = [];
 const MAX_RETRIES = 3; // Número máximo de reintentos
 const RETRY_DELAY = 5000; // Tiempo en milisegundos entre reintentos
+
+// Configuración del rate limiter para proteger createSecure
+const rateLimiter = new RateLimiterMemory({
+    points: 5, // 5 intentos
+    duration: 600, // por cada 10 minutos
+});
 
 
 
@@ -77,10 +84,8 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
             //guardar user en cupon
             if (coupon_used) {
                 try {
-                    // Nota: El campo 'users' puede no existir en el schema del cupón
-                    // await strapi.entityService.update('api::coupon.coupon', coupon_used.id, {
-                    //     data: { users: user.id },
-                    // });
+                    // Registrar que el usuario ha usado este cupón
+                    await registerCouponUsage(user.id, coupon_used.id);
                     console.log(`Cupón ${coupon_used.id} usado por usuario ${user.id}`);
                 } catch (error) {
                     console.error('Error al actualizar el cupón:', error);
@@ -157,16 +162,49 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
         const { products, user, coupon_used, summary, address } = ctx.request.body;
         const order_id = 'MX-' + generateUniqueID();
 
+        // Debug: Ver qué datos estamos recibiendo
+        console.log('🔍 [ORDER] Datos recibidos en create:');
+        console.log('- Usuario:', user?.id, user?.email);
+        console.log('- Summary:', summary);
+        console.log('- Productos en summary:', summary?.products);
+        console.log('- Dirección:', address?.id);
 
         try {
             const productItems = summary.products.map(product => {
+                console.log('🔍 [ORDER] Procesando producto:', product);
+
                 // Crear nombre del producto incluyendo variación si existe
                 let productName = product.product_name;
                 if (product.size && product.size.trim() !== '') {
                     // Extraer solo el nombre de la talla (antes del primer guión si existe)
                     const sizeName = product.size.split('-')[0];
                     productName = `${product.product_name} - Talla: ${sizeName}`;
+                }                // Normalizar precios - manejar ambos formatos (carrito vs compra directa)
+                let unitAmount;
+
+                if (product.discountPrice && product.discountPrice > 0) {
+                    // Formato del carrito: discountPrice ya viene en centavos después de normalización
+                    unitAmount = Math.round(product.discountPrice);
+                } else if (product.discount && product.discount > 0) {
+                    // Formato de compra directa: calcular precio con descuento
+                    // realPrice ya viene en centavos desde calculatePriceProduct o fue normalizado
+                    const discountedPrice = product.realPrice * (1 - product.discount / 100);
+                    unitAmount = Math.round(discountedPrice);
+                } else {
+                    // Sin descuento: usar precio real
+                    // realPrice ya viene en centavos o fue normalizado
+                    unitAmount = Math.round(product.realPrice);
                 }
+
+                console.log(`💰 [ORDER] Precio calculado para ${productName}:`, {
+                    realPrice: product.realPrice,
+                    realPriceInPesos: product.realPrice / 100,
+                    discount: product.discount,
+                    discountPrice: product.discountPrice,
+                    discountPriceInPesos: product.discountPrice ? product.discountPrice : 'N/A',
+                    unitAmount: unitAmount,
+                    unitAmountInPesos: unitAmount / 100
+                });
 
                 return {
                     price_data: {
@@ -174,13 +212,18 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                         product_data: {
                             name: productName,
                         },
-                        unit_amount: product.discount > 0 ? product.discountPrice : product.realPrice,
+                        unit_amount: unitAmount,
                     },
                     quantity: product.stockSelected,
                 };
             });
 
             const shipping_cost = summary.shipping_cost;
+            console.log('🚚 [ORDER] Shipping cost recibido:', {
+                shipping_cost,
+                shipping_cost_in_pesos: shipping_cost / 100,
+                is_free: shipping_cost === 0
+            });
             const clientReferenceId = user.id;
 
             const sessionData = {
@@ -208,8 +251,6 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                     receipt_email: user.email
                     // Removido setup_future_usage ya que causaba error con valor null
                 },
-                // Desabilitar la página de éxito automática de Stripe para OXXO
-                allow_promotion_codes: false,
                 billing_address_collection: 'auto',
                 shipping_options: [
                     {
@@ -217,7 +258,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                             display_name: 'Costo de envío',
                             type: 'fixed_amount',
                             fixed_amount: {
-                                amount: shipping_cost,
+                                amount: shipping_cost, // shipping_cost ya viene en centavos del frontend
                                 currency: 'mxn',
                             },
                         },
@@ -227,7 +268,7 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
             let subtotal = products.reduce((sum, product) => sum + product.realPrice * product.stockSelected, 0);
 
-
+            // Configurar cupón de descuento si se aplica
             if (coupon_used && coupon_used.is_active) {
                 sessionData.discounts = [
                     {
@@ -238,6 +279,9 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
                         }).then(coupon => coupon.id),
                     },
                 ];
+            } else {
+                // Solo establecer allow_promotion_codes si NO hay cupón aplicado
+                sessionData.allow_promotion_codes = false;
             }
 
             const session = await stripe.checkout.sessions.create(sessionData);
@@ -419,6 +463,409 @@ module.exports = createCoreController('api::order.order', ({ strapi }) => ({
 
         ctx.status = 200;
         ctx.body = { received: true };
+    },
+
+    // Crear nueva orden y sesión de Stripe - VERSIÓN SEGURA
+    async createSecure(ctx) {
+        // Rate limiting por IP
+        let ip = ctx.request.ip || ctx.request.header['x-forwarded-for'] || ctx.request.headers['x-real-ip'] || ctx.req.connection.remoteAddress;
+        if (Array.isArray(ip)) {
+            ip = ip[0]; // Tomar el primer valor si es un array
+        }
+        try {
+            await rateLimiter.consume(ip);
+        } catch (rejRes) {
+            ctx.status = 429;
+            ctx.body = { error: 'Demasiadas solicitudes. Intenta de nuevo más tarde.' };
+            return;
+        }
+
+        const { products, userId, couponId, addressId } = ctx.request.body;
+
+        console.log('🔒 [ORDER-SECURE] Datos recibidos:', {
+            products: products?.length || 0,
+            userId,
+            couponId,
+            addressId,
+            addressIdType: typeof addressId,
+            addressIdValue: addressId,
+            produc: products[0]
+        });
+
+        try {
+            // Paso 1: Validar y calcular la orden
+            console.log('🔍 [ORDER-SECURE] Validando productos...');
+
+            // Validar datos de entrada
+            if (!products || !Array.isArray(products) || products.length === 0) {
+                return ctx.badRequest('Products array is required');
+            }
+
+            // Validar estructura de productos
+            for (const product of products) {
+                if (!product.id || !product.quantity || product.quantity <= 0) {
+                    return ctx.badRequest('Each product must have id and quantity > 0');
+                }
+            }
+
+            // Obtener datos del usuario para validar direcciones
+            const user = await strapi.entityService.findOne('plugin::users-permissions.user', userId, {
+                populate: { addresses: true }
+            });
+
+            if (!user) {
+                return ctx.badRequest('Usuario no encontrado');
+            }
+
+
+
+            // Buscar dirección seleccionada por addressId, si existe y pertenece al usuario
+            let selectedAddress = null;
+            if (addressId) {
+                console.log(`🔍 [ORDER-SECURE] Buscando dirección con ID: ${addressId}`);
+                selectedAddress = user.addresses?.find(addr => addr.id == addressId);
+                console.log('📍 [ORDER-SECURE] Dirección encontrada por ID:', selectedAddress ? {
+                    id: selectedAddress.id,
+                    is_main: selectedAddress.is_main,
+                    street: selectedAddress.street
+                } : null);
+
+                if (!selectedAddress) {
+                    return ctx.badRequest('La dirección seleccionada no pertenece al usuario');
+                }
+            }
+            // Si no se envió addressId, usar la principal
+            else {
+                console.log(user)
+                console.log('🔍 [ORDER-SECURE] Buscando dirección principal (is_main: true)');
+                selectedAddress = user.addresses?.find(addr => addr.is_main);
+
+            }
+            if (!selectedAddress) {
+                return ctx.badRequest('El usuario debe tener una dirección principal configurada o seleccionar una dirección válida');
+            }
+
+            // Calcular productos del carrito
+            const calculatedProducts = [];
+            let subtotal = 0;
+
+            for (const productRequest of products) {
+                const { id: productId, quantity, variationId } = productRequest;
+
+                // Obtener producto desde la base de datos
+                    const product = await strapi.entityService.findOne('api::product.product', productId, {
+                        populate: { variations: true, images: true }
+                    });
+
+                if (!product) {
+                    return ctx.badRequest(`Producto con ID ${productId} no encontrado`);
+                }
+
+                console.log(product);
+                let stockAvailable = product.stock;
+                let productName = product.product_name;
+                let sku = product.sku;
+                let productPrice = product.price;
+
+                // Manejar variaciones si existen
+                if (variationId) {
+                    const variation = product.variations?.find(v => v.id === variationId);
+                    if (!variation) {
+                        return ctx.badRequest(`Variación con ID ${variationId} no encontrada en producto ${productId}`);
+                    }
+                    console.log(`🔍 [ORDER-SECURE] Variación encontrada: ${variation.size} (ID: ${variation.id})`);
+                    stockAvailable = variation.stock;
+                    productName = `${product.product_name} - Talla: ${variation.size.split('-')[0]}`; // Extraer solo el nombre de la talla
+                    sku = variation.sku;
+                    productPrice = variation.price;
+                }
+
+                // Validar stock disponible
+                if (quantity > stockAvailable) {
+                    return ctx.badRequest(`Stock insuficiente para ${productName}. Disponible: ${stockAvailable}, Solicitado: ${quantity}`);
+                }
+
+                // Calcular precio con descuentos si los hay
+                let finalPrice = productPrice;
+                let discountApplied = 0;
+
+                if (product.discount && product.discount > 0) {
+                    discountApplied = product.discount;
+                    finalPrice = productPrice * (1 - discountApplied / 100);
+                }
+
+                const productTotal = finalPrice * quantity;
+                subtotal += productTotal;
+
+                console.log(`📊 [ORDER] Producto: ${productName}, Precio original: ${productPrice} (unidad DB), Precio final: ${finalPrice} (unidad DB), Cantidad: ${quantity}, Total: ${productTotal} (unidad DB)`);
+
+                calculatedProducts.push({
+                    id: productId,
+                    variationId: variationId || null,
+                    product_name: productName,
+                    sku,
+                    price: productPrice,
+                    finalPrice,
+                    discountApplied,
+                    quantity,
+                    total: productTotal,
+                    stockAvailable,
+                    urlImage: product.images[0]?.formats.small?.url || product.images[0]?.url || null,
+                    slug: product.slug,
+                });
+            }
+
+            // Calcular costo de envío
+            // IMPORTANTE: Verificar si los precios en DB están en centavos o pesos
+            const SHIPPING_COST = parseFloat(process.env.SHIPPING_COST || '17000');
+            const MIN_FREE_SHIPPING_PESOS = parseFloat(process.env.QUANTITY_MIN_FREE_SHIPPING || '1500');
+
+            // Verificar qué unidad está usando la DB basándose en el primer producto
+            const firstProductPrice = calculatedProducts[0]?.price || 0;
+            const isPriceInCentavos = firstProductPrice > 1000; // Si es > 1000, probablemente está en centavos
+
+            let shippingCost;
+            if (isPriceInCentavos) {
+                // Precios en centavos: convertir MIN_FREE_SHIPPING a centavos
+                const MIN_FREE_SHIPPING = MIN_FREE_SHIPPING_PESOS * 100;
+                shippingCost = subtotal >= MIN_FREE_SHIPPING ? 0 : SHIPPING_COST;
+                console.log(`📊 [ORDER] Precios detectados en CENTAVOS`);
+            } else {
+                // Precios en pesos: comparar directamente
+                shippingCost = subtotal >= MIN_FREE_SHIPPING_PESOS ? 0 : SHIPPING_COST;
+                console.log(`📊 [ORDER] Precios detectados en PESOS`);
+            }
+
+            console.log(`💰 [ORDER] ANÁLISIS DE UNIDADES:`);
+            console.log(`- Primer producto precio: ${firstProductPrice} (${isPriceInCentavos ? 'centavos' : 'pesos'})`);
+            console.log(`- Subtotal desde DB: ${subtotal} (${isPriceInCentavos ? 'centavos' : 'pesos'})`);
+            console.log(`- Subtotal en pesos: ${isPriceInCentavos ? subtotal / 100 : subtotal} pesos`);
+            console.log(`- MIN_FREE_SHIPPING_PESOS: ${MIN_FREE_SHIPPING_PESOS} pesos`);
+            console.log(`- Comparación resultado: envío gratis = ${shippingCost === 0}`);
+            console.log(`- Envío aplicado: ${shippingCost} pesos`);
+
+            // Aplicar cupón si existe
+            let couponDiscount = 0;
+
+            if (couponId) {
+                const coupon = await strapi.entityService.findOne('api::coupon.coupon', couponId);
+
+                if (!coupon) {
+                    return ctx.badRequest('Cupón no encontrado');
+                }
+
+                // Validar cupón básico
+                const currentDate = new Date();
+                const validUntil = new Date(coupon.valid_until);
+
+                if (currentDate > validUntil) {
+                    return ctx.badRequest('El cupón ha expirado');
+                }
+
+                if (!coupon.is_active) {
+                    return ctx.badRequest('El cupón no está activo');
+                }
+
+                // Calcular descuento
+                couponDiscount = (subtotal * coupon.discount) / 100;
+            }
+
+            // Calcular total final
+            const total = subtotal - couponDiscount + shippingCost;
+
+            const calculatedOrder = {
+                products: calculatedProducts,
+                subtotal,
+                shippingCost,
+                couponDiscount,
+                total,
+                address: {
+                    ...selectedAddress,
+                }
+            };
+            const order_id = 'MX-' + generateUniqueID();
+
+            console.log('✅ [ORDER-SECURE] Orden calculada:', {
+                subtotal: calculatedOrder.subtotal,
+                total: calculatedOrder.total,
+                products: calculatedOrder.products.length
+            });
+
+            // Paso 2: Crear los line items para Stripe usando precios ya descontados
+            // Si hay descuento, distribuirlo proporcionalmente entre todos los productos
+            let productItems = [];
+
+            if (calculatedOrder.couponDiscount > 0) {
+                console.log(`🎫 [ORDER-SECURE] Aplicando descuento de ${calculatedOrder.couponDiscount} distribuido entre productos`);
+                // Calcular el descuento proporcional para cada producto usando finalPrice (precio ya con descuento individual)
+                productItems = calculatedOrder.products.map(product => {
+                    const productSubtotal = product.finalPrice * product.quantity;
+                    const proportionalDiscount = (productSubtotal / calculatedOrder.subtotal) * calculatedOrder.couponDiscount;
+                    const discountedSubtotal = productSubtotal - proportionalDiscount;
+                    let discountedUnitPrice = Math.round(discountedSubtotal / product.quantity);
+                    // Validación estricta para Stripe
+                    if (!Number.isInteger(discountedUnitPrice) || isNaN(discountedUnitPrice) || discountedUnitPrice < 0) {
+                        throw new Error(`Precio inválido para Stripe (unit_amount): ${discountedUnitPrice} en producto ${product.product_name}`);
+                    }
+                    console.log(`🛍️ [ORDER-SECURE] ${product.product_name}: Precio con descuento individual ${product.finalPrice}, después del cupón ${discountedUnitPrice}`);
+                    return {
+                        price_data: {
+                            currency: 'mxn',
+                            product_data: {
+                                name: `${product.product_name} (con descuento de cupón aplicado)`,
+                            },
+                            unit_amount: discountedUnitPrice,
+                        },
+                        quantity: product.quantity,
+                    };
+                });
+            } else {
+                // Sin descuento, usar precios finales (que pueden incluir descuentos del producto)
+                productItems = calculatedOrder.products.map(product => {
+                    let unitPrice = Math.round(product.finalPrice);
+                    if (!Number.isInteger(unitPrice) || isNaN(unitPrice) || unitPrice < 0) {
+                        throw new Error(`Precio inválido para Stripe (unit_amount): ${unitPrice} en producto ${product.product_name}`);
+                    }
+                    console.log(`🛍️ [ORDER-SECURE] ${product.product_name}: Precio original ${product.price}, Precio final ${unitPrice} (${product.discountApplied > 0 ? 'con descuento' : 'sin descuento'})`);
+                    return {
+                        price_data: {
+                            currency: 'mxn',
+                            product_data: {
+                                name: product.discountApplied > 0 ? `${product.product_name} (${product.discountApplied}% descuento)` : product.product_name,
+                            },
+                            unit_amount: unitPrice,
+                        },
+                        quantity: product.quantity,
+                    };
+                });
+            }
+
+            // Paso 3: Configurar shipping
+            const shipping_cost = calculatedOrder.shippingCost;
+
+            console.log(`🚚 [ORDER-SECURE] Costo de envío: ${calculatedOrder.shippingCost} para Stripe`);
+
+            // Paso 4: Crear sesión de Stripe
+            const sessionData = {
+                payment_method_types: ['card', 'oxxo'],
+                payment_method_options: {
+                    oxxo: {
+                        expires_after_days: 2,
+                    },
+                },
+                mode: 'payment',
+                success_url: `${process.env.PUBLIC_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.PUBLIC_URL}/status-pay?session_id={CHECKOUT_SESSION_ID}&cancelled=true`,
+                line_items: productItems,
+                client_reference_id: userId,
+                customer_email: user.email, // ¡AGREGADO! - Email del usuario para prefill en Stripe
+                metadata: {
+                    order_id,
+                    user_id: userId,
+                    user_email: user.email, // También en metadata para referencia
+                    coupon_id: couponId || '',
+                    secure_order: 'true',
+                    address_id: selectedAddress.id,
+                    address_street: selectedAddress.street,
+                    address_city: selectedAddress.city
+                },
+                payment_intent_data: {
+                    metadata: {
+                        order_id: order_id,
+                        user_id: userId,
+                        user_email: user.email, // También en payment intent metadata
+                        coupon_id: couponId || '',
+                        secure_order: 'true',
+                        address_id: selectedAddress.id
+                    }
+                },
+                billing_address_collection: 'auto'
+            };
+
+            console.log('🏷️ [ORDER-SECURE] Metadatos para Stripe:', {
+                order_id,
+                user_id: userId,
+                address_id: selectedAddress.id,
+                address_street: selectedAddress.street
+            });
+
+            // Paso 5: Agregar shipping si hay costo
+            if (shipping_cost > 0) {
+                sessionData.shipping_options = [
+                    {
+                        shipping_rate_data: {
+                            type: 'fixed_amount',
+                            fixed_amount: {
+                                amount: shipping_cost,
+                                currency: 'mxn',
+                            },
+                            display_name: 'Envío estándar',
+                        },
+                    },
+                ];
+            }
+
+            const session = await stripe.checkout.sessions.create(sessionData);
+
+            console.log('💳 [ORDER-SECURE] Sesión de Stripe creada:', session.id);
+            if (calculatedOrder.couponDiscount > 0) {
+                console.log(`🎫 [ORDER-SECURE] Descuento de cupón aplicado: ${calculatedOrder.couponDiscount}`);
+            }
+            
+            // Log resumen de precios para debugging
+            calculatedOrder.products.forEach(product => {
+                if (product.discountApplied > 0) {
+                    console.log(`🏷️ [ORDER-SECURE] ${product.product_name}: Precio original ${product.price}, con descuento ${product.discountApplied}%, precio final ${product.finalPrice}`);
+                }
+            });
+
+            // Paso 6: Crear la orden en base de datos
+            const orderData = {
+                products: calculatedOrder.products,
+                total: calculatedOrder.total,
+                order_status: 'pending',
+                stripe_id: session.id,
+                order_id: order_id, // Cambiar 'unique_id' por 'order_id' según el schema
+                user: userId,
+                coupon_used: couponId || null,
+                shipping_cost: calculatedOrder.shippingCost,
+                subtotal: calculatedOrder.subtotal,
+                coupon_discount: calculatedOrder.couponDiscount || 0,
+                address: calculatedOrder.address, // ¡AGREGADO! - Guardar la dirección
+                order_date: new Date() // Agregar fecha de orden
+            };
+
+            console.log('💾 [ORDER-SECURE] Guardando orden con dirección:', {
+                orderId: order_id,
+                addressId: calculatedOrder.address.id,
+                addressStreet: calculatedOrder.address.street,
+                userId,
+                userName: user.username,
+                userEmail: user.email
+            });
+
+            const order = await strapi.service('api::order.order').create({
+                data: {
+                    ...orderData,
+                    customer_name: user.username,
+                    customer_email: user.email
+                },
+            });
+
+            console.log('✅ [ORDER-SECURE] Orden creada en DB:', order.id);
+
+            return ctx.send({
+                sessionId: session.id,
+                url: session.url,
+                orderId: order.id,
+                uniqueId: order_id,
+                calculatedData: calculatedOrder
+            });
+
+        } catch (error) {
+            console.error('❌ [ORDER-SECURE] Error:', error);
+            return ctx.internalServerError('Error al crear la orden: ' + error.message);
+        }
     },
 
 
@@ -1360,6 +1807,51 @@ async function sendOxxoEmailWithRetry(receipt_email, voucher_url, expire_date) {
 }
 
 /**
+ * Función para registrar el uso de un cupón por un usuario
+ */
+async function registerCouponUsage(userId, couponId) {
+    try {
+        // Primero, intentar usar el nuevo campo used_by_users
+        try {
+            const coupon = await strapi.entityService.findOne('api::coupon.coupon', couponId, {
+                populate: { used_by_users: true },
+            });
+
+            if (coupon && coupon.used_by_users) {
+                // Verificar si el usuario ya está en la lista
+                const currentUserIds = coupon.used_by_users.map(user => user.id);
+
+                if (!currentUserIds.includes(userId)) {
+                    // Usar la API de Strapi para conectar la relación
+                    await strapi.db.query('api::coupon.coupon').update({
+                        where: { id: couponId },
+                        data: {
+                            used_by_users: {
+                                connect: [userId]
+                            }
+                        }
+                    });
+
+                    console.log(`✅ Usuario ${userId} agregado a used_by_users del cupón ${couponId}`);
+                } else {
+                    console.log(`ℹ️ Usuario ${userId} ya estaba en used_by_users del cupón ${couponId}`);
+                }
+                return;
+            }
+        } catch (error) {
+            console.log(`⚠️ Campo used_by_users no disponible, usando método alternativo:`, error.message);
+        }
+
+        // Método alternativo: el registro ya está en la orden con coupon_used
+        console.log(`📝 Registro de uso de cupón guardado en la orden para usuario ${userId} y cupón ${couponId}`);
+
+    } catch (error) {
+        console.error('Error al registrar uso del cupón:', error);
+        throw error;
+    }
+}
+
+/**
  * Fulfillment optimizado de checkout con validación mejorada
  */
 async function fulfillCheckoutOptimized(sessionId, isAsyncPayment) {
@@ -1479,7 +1971,17 @@ async function fulfillCheckoutOptimized(sessionId, isAsyncPayment) {
             data: updateData
         });
 
-        console.log(`✅ Orden ${order.id} completada exitosamente con método: ${detectedPaymentMethod}`);
+        console.log(`✅ Orden ${order.id} completada exitosamente`);
+
+        // Registrar uso de cupón si existe
+        if (order.coupon_used) {
+            try {
+                await registerCouponUsage(order.user, order.coupon_used);
+                console.log(`✅ Cupón ${order.coupon_used} registrado como usado por usuario ${order.user}`);
+            } catch (couponError) {
+                console.error('Error registrando uso de cupón en fulfillment:', couponError);
+            }
+        }
 
         // Enviar email de confirmación con control de duplicados básico
         const { name: emailCustomerName, email: emailCustomerEmail } = checkoutSession.customer_details || {};
@@ -1501,58 +2003,34 @@ async function fulfillCheckoutOptimized(sessionId, isAsyncPayment) {
                     strapi,
                     order.products,
                     emailSubject,
-                    detectedPaymentMethod, // ← Este es el parámetro crítico
+                    detectedPaymentMethod,
                     isAsyncPayment,
-                    order.id, // Añadir orderId
-                    payment_intent_id // Añadir paymentIntentId
+                    order.id,
+                    payment_intent_id
                 );
 
                 console.log(`📧 PARÁMETROS ENVIADOS AL EMAIL:`);
                 console.log(`   - Método de pago enviado: ${detectedPaymentMethod}`);
-                console.log(`   - Es asíncrono: ${isAsyncPayment}`);
-                console.log(`   - Asunto: ${emailSubject}`);
-                console.log(`   - Destinatario: ${emailCustomerEmail}`);
-                console.log(`   - Orden ID: ${order.id}`);
+                console.log(`   - Es pago asíncrono: ${isAsyncPayment}`);
+                console.log(`   - Es OXXO: ${isOxxo}`);
+                console.log(`   - Email enviado exitosamente: ${emailSuccess}`);
 
-                if (emailSuccess) {
-                    console.log(`✅ Email de confirmación enviado a: ${emailCustomerEmail} (${detectedPaymentMethod}, async: ${isAsyncPayment})`);
-                } else {
-                    console.error(`❌ No se pudo enviar email de confirmación a: ${emailCustomerEmail}`);
+                if (!emailSuccess) {
+                    console.error(`❌ No se pudo enviar email de confirmación para orden ${order.id}`);
                 }
 
             } catch (emailError) {
-                console.error(`❌ Error en email de confirmación:`, emailError);
-                // No lanzar error - la orden ya fue procesada
+                console.error(`❌ Error enviando email de confirmación para orden ${order.id}:`, emailError);
             }
-        } else {
-            console.warn(`⚠️ No se puede enviar email de confirmación:`);
-            console.warn(`   - Email disponible: ${!!emailCustomerEmail}`);
-            console.warn(`   - Productos disponibles: ${!!order.products}`);
         }
+
+        console.log(`📦 === FULFILLMENT COMPLETADO ===`);
+        console.log(`📦 Orden ${order.id} procesada con éxito`);
+        console.log(`📦 Método de pago: ${detectedPaymentMethod}`);
+        console.log(`📦 Email enviado: ${emailCustomerEmail ? 'Sí' : 'No disponible'}`);
 
     } catch (error) {
-        console.error(`❌ Error en fulfillment para sesión ${sessionId}:`, error);
-
-        // Marcar orden como fallida en caso de error crítico
-        try {
-            const orders = await strapi.entityService.findMany('api::order.order', {
-                filters: { stripe_id: sessionId },
-                limit: 1,
-            });
-
-            if (orders.length > 0) {
-                await strapi.entityService.update('api::order.order', orders[0].id, {
-                    data: {
-                        order_status: 'failed',
-                        last_updated: new Date()
-                    }
-                });
-                console.log(`❌ Orden ${orders[0].id} marcada como fallida debido a error en fulfillment`);
-            }
-        } catch (updateError) {
-            console.error(`❌ Error actualizando orden a fallida:`, updateError);
-        }
-
+        console.error(`❌ Error en fulfillCheckoutOptimized para sesión ${sessionId}:`, error);
         throw error;
     }
 }
@@ -1563,221 +2041,142 @@ async function fulfillCheckoutOptimized(sessionId, isAsyncPayment) {
  */
 function detectPaymentMethod(sessionData, paymentIntentData, order = null) {
     console.log(`🔍 === DETECTANDO MÉTODO DE PAGO ===`);
+
+    // Logs detallados de entrada
     console.log(`🔍 Session payment_method_types:`, sessionData?.payment_method_types);
     console.log(`🔍 Session payment_status:`, sessionData?.payment_status);
-    console.log(`🔍 Session payment_intent:`, sessionData?.payment_intent);
     console.log(`🔍 Payment Intent payment_method_types:`, paymentIntentData?.payment_method_types);
-    console.log(`🔍 Session payment_method_options:`, sessionData?.payment_method_options);
-    console.log(`🔍 Order existing payment_method:`, order?.payment_method);
+    console.log(`🔍 Payment Intent status:`, paymentIntentData?.status);
+    console.log(`🔍 Orden ID:`, order?.id);
 
-    let paymentMethod = 'unknown';
+    let detectedMethod = 'card'; // Default
     let isOxxo = false;
 
-    // PRIORIDAD 1: Verificar el payment_intent expandido para obtener el método REAL usado
-    if (sessionData?.payment_intent) {
-        const pi = sessionData.payment_intent;
-        console.log(`🔍 Payment Intent expandido:`, {
-            id: pi.id,
-            status: pi.status,
-            payment_method_types: pi.payment_method_types,
-            charges: pi.charges?.data?.length || 0
-        });
+    // 1. Verificar primero en charges del payment intent (más confiable)
+    if (sessionData?.payment_intent?.charges?.data?.length > 0) {
+        const charge = sessionData.payment_intent.charges.data[0];
+        const paymentMethodDetails = charge.payment_method_details;
 
-        // Verificar charges para método real usado
-        if (pi.charges?.data?.length > 0) {
-            const charge = pi.charges.data[0]; // El primer charge tiene el método usado
-            console.log(`🔍 Primer charge:`, {
-                id: charge.id,
-                payment_method_details: Object.keys(charge.payment_method_details || {})
-            });
+        console.log(`🔍 Charge payment method details keys:`, Object.keys(paymentMethodDetails || {}));
 
-            if (charge.payment_method_details?.card) {
-                console.log(`💳 TARJETA detectada en charge payment_method_details (MÉTODO REAL)`);
-                return { paymentMethod: 'card', isOxxo: false };
-            }
-
-            if (charge.payment_method_details?.oxxo) {
-                console.log(`🏪 OXXO detectado en charge payment_method_details (MÉTODO REAL)`);
-                return { paymentMethod: 'oxxo', isOxxo: true };
-            }
-        }
-
-        // Verificar next_action para OXXO (pago pendiente)
-        if (pi.next_action?.oxxo_display_details?.hosted_voucher_url) {
-            console.log(`🏪 OXXO detectado en next_action con voucher URL (MÉTODO REAL)`);
-            return { paymentMethod: 'oxxo', isOxxo: true };
+        if (paymentMethodDetails?.oxxo) {
+            detectedMethod = 'oxxo';
+            isOxxo = true;
+            console.log(`✅ OXXO detectado desde charges`);
+        } else if (paymentMethodDetails?.card) {
+            detectedMethod = 'card';
+            console.log(`✅ Card detectado desde charges`);
         }
     }
 
-    // PRIORIDAD 2: Para payment intent directo (sin session)
-    if (paymentIntentData && !sessionData) {
-        // Verificar next_action para OXXO
-        if (paymentIntentData.next_action?.oxxo_display_details?.hosted_voucher_url) {
-            console.log(`🏪 OXXO detectado en PaymentIntent next_action`);
-            return { paymentMethod: 'oxxo', isOxxo: true };
-        }
-
-        // Verificar charges
-        if (paymentIntentData.charges?.data?.length > 0) {
-            const charge = paymentIntentData.charges.data[0];
-            if (charge.payment_method_details?.oxxo) {
-                console.log(`🏪 OXXO detectado en PaymentIntent charges`);
-                return { paymentMethod: 'oxxo', isOxxo: true };
-            }
-            if (charge.payment_method_details?.card) {
-                console.log(`💳 TARJETA detectada en PaymentIntent charges`);
-                return { paymentMethod: 'card', isOxxo: false };
-            }
+    // 2. Si no hay charges, verificar por payment_method_types en sesión
+    if (!isOxxo && sessionData?.payment_method_types?.includes('oxxo')) {
+        // Para OXXO, verificar que esté en estado correcto
+        if (sessionData.payment_status === 'unpaid' ||
+            sessionData.payment_status === 'paid' ||
+            sessionData?.payment_intent?.status === 'requires_action') {
+            detectedMethod = 'oxxo';
+            isOxxo = true;
+            console.log(`✅ OXXO detectado desde session payment_method_types`);
         }
     }
 
-    // PRIORIDAD 3: Verificar si la orden ya tiene OXXO como método
-    if (order?.payment_method === 'oxxo') {
-        console.log(`🏪 OXXO detectado en orden existente`);
-        return { paymentMethod: 'oxxo', isOxxo: true };
+    // 3. Si no hay payment_method_types en sesión, verificar en payment intent
+    if (!isOxxo && paymentIntentData?.payment_method_types?.includes('oxxo')) {
+        detectedMethod = 'oxxo';
+        isOxxo = true;
+        console.log(`✅ OXXO detectado desde payment intent payment_method_types`);
     }
 
-    // PRIORIDAD 4: Si no hay información específica del método usado, 
-    // usar el estado de la sesión para inferir
-    if (sessionData?.payment_status === 'paid') {
-        // Si está pagado pero no detectamos método específico, asumir tarjeta
-        console.log(`💳 Sesión pagada sin método específico - Asumiendo tarjeta`);
-        return { paymentMethod: 'card', isOxxo: false };
-    }
+    // 4. Validación adicional para OXXO basada en status
+    if (isOxxo) {
+        const piStatus = sessionData?.payment_intent?.status || paymentIntentData?.status;
+        const sessionStatus = sessionData?.payment_status;
 
-    if (sessionData?.payment_status === 'unpaid' &&
-        sessionData?.payment_method_types?.includes('oxxo')) {
-        // Si no está pagado y OXXO está disponible, podría ser OXXO pendiente
-        console.log(`🏪 Sesión no pagada con OXXO disponible - Verificando más detalles`);
+        console.log(`🏪 Validación OXXO - PI Status: ${piStatus}, Session Status: ${sessionStatus}`);
 
-        // Solo considerar OXXO si hay evidencia de que fue seleccionado
-        if (sessionData?.payment_method_options?.oxxo) {
-            console.log(`🏪 OXXO confirmado por opciones específicas`);
-            return { paymentMethod: 'oxxo', isOxxo: true };
+        // OXXO válido debe tener requires_action o succeeded con unpaid/paid
+        if (piStatus === 'requires_action' ||
+            (piStatus === 'succeeded' && sessionStatus === 'paid') ||
+            sessionStatus === 'unpaid') {
+            console.log(`✅ Estado OXXO válido confirmado`);
+        } else {
+            console.log(`⚠️ Estado OXXO inválido, defaulting a card`);
+            detectedMethod = 'card';
+            isOxxo = false;
         }
     }
 
-    // FALLBACK: Usar el primer método disponible (generalmente 'card')
-    const firstMethodType = sessionData?.payment_method_types?.[0] ||
-        paymentIntentData?.payment_method_types?.[0] ||
-        'card';
+    console.log(`🔍 === RESULTADO FINAL ===`);
+    console.log(`🔍 Método detectado: ${detectedMethod}`);
+    console.log(`🔍 Es OXXO: ${isOxxo}`);
 
-    console.log(`💳 Método de pago por defecto: ${firstMethodType} (fallback)`);
-    console.log(`🔍 === RESULTADO DETECCIÓN ===`);
-    console.log(`🔍 Payment Method: ${firstMethodType}, Is OXXO: false`);
-
-    return {
-        paymentMethod: firstMethodType,
-        isOxxo: false
-    };
+    return { paymentMethod: detectedMethod, isOxxo };
 }
 
 /**
  * Manejo optimizado de pagos OXXO con validación mejorada y rate limiting
  */
 async function handleOxxoPaymentOptimized(paymentData) {
-    try {
-        console.log(`🏪 === PROCESANDO PAGO OXXO ===`);
-        console.log(`🏪 Payment Intent ID: ${paymentData.id}`);
-        console.log(`🏪 Payment Intent Status: ${paymentData.status}`);
-        console.log(`🏪 Receipt Email: ${paymentData.receipt_email}`);
-        console.log(`🏪 Payment Method Types:`, paymentData.payment_method_types);
-        console.log(`🏪 MÉTODO DE PAGO DETECTADO: OXXO`);
-        console.log(`🏪 Next Action:`, paymentData.next_action);
+    console.log(`🏪 === PROCESANDO PAGO OXXO ===`);
+    console.log(`🏪 Payment Intent ID: ${paymentData.id}`);
+    console.log(`🏪 Status: ${paymentData.status}`);
+    console.log(`🏪 Next action type: ${paymentData.next_action?.type}`);
 
-        const voucher_url = paymentData.next_action?.oxxo_display_details?.hosted_voucher_url;
-        const expire_days = paymentData.payment_method_options?.oxxo?.expires_after_days;
-        const receipt_email = paymentData.receipt_email;
+    if (!paymentData.next_action?.oxxo_display_details?.hosted_voucher_url) {
+        console.error(`❌ No se encontró voucher URL para OXXO payment: ${paymentData.id}`);
+        return;
+    }
 
-        console.log(`🏪 Voucher URL: ${voucher_url}`);
-        console.log(`🏪 Expire days: ${expire_days}`);
-        console.log(`🏪 Receipt email: ${receipt_email}`);
+    const voucher_url = paymentData.next_action.oxxo_display_details.hosted_voucher_url;
+    const expire_date = paymentData.next_action.oxxo_display_details.expires_after ||
+        new Date(Date.now() + 2 * 24 * 60 * 60 * 1000); // 2 días por defecto
 
-        if (!voucher_url || !expire_days) {
-            console.error("❌ Datos incompletos para pago OXXO:", {
-                voucher_url: !!voucher_url,
-                expire_days: !!expire_days,
-                paymentIntentId: paymentData.id,
-                next_action: paymentData.next_action,
-                payment_method_options: paymentData.payment_method_options
-            });
+    console.log(`🏪 Voucher URL obtenido: ${voucher_url}`);
+    console.log(`🏪 Fecha de expiración: ${expire_date}`);
+
+    const receipt_email = paymentData.receipt_email;
+    if (!receipt_email) {
+        console.error(`❌ No hay email de recibo para OXXO payment: ${paymentData.id}`);
+        return;
+    }
+
+    // Rate limiting para OXXO - máximo 1 email por minuto por payment intent
+    const rateLimitKey = `oxxo_${paymentData.id}`;
+    const lastSent = global.oxxoEmailCache = global.oxxoEmailCache || {};
+
+    if (lastSent[rateLimitKey]) {
+        const timeSince = Date.now() - lastSent[rateLimitKey];
+        if (timeSince < 60000) { // 1 minuto
+            console.log(`🏪 ⏱️ Rate limit para OXXO ${paymentData.id} - última vez enviado hace ${timeSince}ms`);
             return;
         }
+    }
 
-        const expire_date = new Date(Date.now() + expire_days * 24 * 60 * 60 * 1000)
-            .toISOString().split('T')[0];
+    // Marcar como enviado antes del intento para evitar duplicados
+    lastSent[rateLimitKey] = Date.now();
 
-        console.log(`🏪 Procesando pago OXXO para Payment Intent: ${paymentData.id}`);
-        console.log(`🏪 📄 Voucher URL generado, expira: ${expire_date}`);
+    try {
+        console.log(`🏪 Enviando email OXXO a: ${receipt_email}`);
 
-        // Buscar la orden usando el payment intent ID
-        const orders = await strapi.entityService.findMany('api::order.order', {
-            filters: { stripe_id: paymentData.id },
-            limit: 1,
-        });
+        const emailSuccess = await sendOxxoEmailWithRetry(receipt_email, voucher_url, expire_date);
 
-        // Si no se encuentra por payment intent, buscar por checkout session
-        let order = null;
-        if (orders.length === 0) {
-            // Buscar usando metadata del payment intent
-            if (paymentData.metadata?.order_id) {
-                const ordersByOrderId = await strapi.entityService.findMany('api::order.order', {
-                    filters: { order_id: paymentData.metadata.order_id },
-                    limit: 1,
-                });
-                order = ordersByOrderId[0];
-            }
+        if (emailSuccess) {
+            console.log(`🏪 ✅ Email OXXO enviado exitosamente a: ${receipt_email}`);
+            console.log(`🏪 ✅ Payment Intent: ${paymentData.id}`);
+            console.log(`🏪 ✅ Voucher URL: ${voucher_url}`);
         } else {
-            order = orders[0];
+            console.error(`🏪 ❌ No se pudo enviar email OXXO a: ${receipt_email}`);
+            // Remover del cache para permitir reintento
+            delete lastSent[rateLimitKey];
         }
 
-        console.log(`🏪 Orden encontrada: ${order ? order.id : 'NO ENCONTRADA'}`);
-
-        // Enviar email con voucher SOLO si hay email y orden
-        if (receipt_email && order) {
-            console.log(`📧 Iniciando envío de email OXXO a: ${receipt_email}`);
-            console.log(`📧 Plugin de email disponible:`, !!(strapi.plugins['email'] && strapi.plugins['email'].services && strapi.plugins['email'].services.email));
-            console.log(`📧 RESEND_API_KEY configurado:`, !!process.env.RESEND_API_KEY);
-
-            try {
-                const emailSuccess = await sendOxxoEmailWithRetry(receipt_email, voucher_url, expire_date);
-
-                if (emailSuccess) {
-                    console.log(`✅ Email OXXO enviado exitosamente a: ${receipt_email}`);
-                    console.log(`🏪 Email confirmado como PAGO OXXO en el asunto y contenido`);
-                } else {
-                    console.error(`❌ No se pudo enviar email OXXO a: ${receipt_email}`);
-                }
-
-            } catch (emailError) {
-                console.error(`❌ Error crítico enviando email OXXO a ${receipt_email}:`, emailError);
-            }
-        } else {
-            console.warn(`⚠️ No se puede enviar email OXXO:`);
-            console.warn(`   - Email disponible: ${!!receipt_email}`);
-            console.warn(`   - Orden encontrada: ${!!order}`);
-        }
-
-        // Actualizar orden para mantener estado pending
-        console.log(`🔄 Actualizando orden para OXXO payment intent: ${paymentData.id}`);
-        if (order) {
-            try {
-                await strapi.entityService.update('api::order.order', order.id, {
-                    data: {
-                        order_status: 'pending' // Asegurar que mantenga estado pending
-                    }
-                });
-                console.log(`✅ Orden ${order.id} actualizada: método de pago OXXO, estado pending`);
-            } catch (updateError) {
-                console.error(`❌ Error actualizando orden ${order.id}:`, updateError);
-            }
-        }
-
-        console.log(`✅ Procesamiento OXXO completado para Payment Intent: ${paymentData.id}`);
-
+        return emailSuccess;
     } catch (error) {
-        console.error(`❌ Error procesando pago OXXO para ${paymentData.id}:`, error);
-        throw error;
+        console.error(`🏪 ❌ Error procesando pago OXXO:`, error);
+        // Remover del cache para permitir reintento
+        delete lastSent[rateLimitKey];
+        return false;
     }
 }
 
@@ -1785,148 +2184,160 @@ async function handleOxxoPaymentOptimized(paymentData) {
  * Envía email de confirmación de compra con diseño profesional y control de duplicados
  */
 async function sendOrderConfirmationEmail(customerName, email, strapi, products, subject = "¡Compra confirmada!", paymentMethod = 'card', isAsyncPayment = false, orderId = null, paymentIntentId = null) {
-    if (!email || !products || products.length === 0) {
-        console.error("❌ Datos incompletos para email de confirmación:", {
-            email: !!email,
-            products: products?.length || 0,
-            name: !!customerName
-        });
-        return false;
+    // Control de duplicados usando orderId y paymentIntentId
+    if (orderId && paymentIntentId) {
+        const canProceed = startEmailProcessing(orderId, paymentIntentId);
+        if (!canProceed) {
+            console.log(`📧 Email de confirmación ya procesándose para orden ${orderId}`);
+            return false;
+        }
     }
-
-    // Control de emails duplicados usando orderId y paymentIntentId
-    const orderIdToUse = orderId || 'unknown';
-    const paymentIntentIdToUse = paymentIntentId || 'unknown';
-
-    if (!startEmailProcessing(orderIdToUse, paymentIntentIdToUse)) {
-        console.log(`📧 Email de confirmación ya en proceso para orden ${orderIdToUse}, saltando...`);
-        return false;
-    }
-
-    console.log(`📧 === PREPARANDO EMAIL DE CONFIRMACIÓN ===`);
-    console.log(`📧 Orden ID: ${orderIdToUse}`);
-    console.log(`📧 Payment Intent ID: ${paymentIntentIdToUse}`);
-    console.log(`📧 Destinatario: ${email}`);
-    console.log(`📧 Cliente: ${customerName}`);
-    console.log(`📧 Método de pago recibido: ${paymentMethod}`);
-    console.log(`📧 Es asíncrono: ${isAsyncPayment}`);
-    console.log(`📧 Productos: ${products.length}`);
-    console.log(`📧 Subject recibido: ${subject}`);
-
-    const customerDisplayName = customerName || 'Cliente';
-    const totalProducts = products.reduce((sum, product) => sum + (product.stockSelected || 1), 0);
-
-    // Generar lista de productos con diseño mejorado
-    const productsList = products.map(product => `
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid #e9ecef;">
-            <div>
-                <div style="font-weight: 500; color: #000000;">${product.product_name}</div>
-                ${product.size ? `<div style="font-size: 14px; color: #666;">Talla: ${product.size}</div>` : ''}
-            </div>
-            <div style="background-color: #000000; color: white; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: 500;">${product.stockSelected || 1}</div>
-        </div>
-    `).join('');
-
-    // Generar contenido según el tipo de pago
-    let statusIcon = '✅';
-    let statusMessage = '';
-    let alertType = 'success';
-
-    console.log(`📧 EVALUANDO LÓGICA DE EMAIL:`);
-    console.log(`📧 paymentMethod === 'oxxo': ${paymentMethod === 'oxxo'}`);
-    console.log(`📧 isAsyncPayment: ${isAsyncPayment}`);
-
-    if (paymentMethod === 'oxxo' && isAsyncPayment) {
-        statusIcon = '🏪';
-        statusMessage = 'Tu pago OXXO fue acreditado exitosamente';
-        alertType = 'success';
-        console.log(`📧 RAMA: OXXO ASYNC - Pago acreditado`);
-    } else if (paymentMethod === 'oxxo') {
-        statusIcon = '⏳';
-        statusMessage = 'Tu pedido está confirmado, pendiente de pago OXXO';
-        alertType = 'warning';
-        console.log(`📧 RAMA: OXXO PENDIENTE - Esperando pago`);
-    } else {
-        statusMessage = isAsyncPayment ? 'Tu pago fue procesado exitosamente' : 'Tu compra fue procesada exitosamente';
-        console.log(`📧 RAMA: NO OXXO - Pago procesado con ${paymentMethod}`);
-    }
-
-    console.log(`📧 RESULTADO: statusIcon=${statusIcon}, statusMessage=${statusMessage}, alertType=${alertType}`);
-
-    const content = `
-        <div style="text-align: center; margin-bottom: 30px;">
-            <h2 style="color: #000000; font-size: 28px; margin: 0;">${statusIcon} ${subject}</h2>
-        </div>
-
-        <div style="background-color: ${alertType === 'success' ? '#d4edda' : '#fff3cd'}; 
-                    border: 1px solid ${alertType === 'success' ? '#c3e6cb' : '#ffeaa7'}; 
-                    border-radius: 5px; padding: 20px; margin: 20px 0; 
-                    color: ${alertType === 'success' ? '#155724' : '#856404'};">
-            <strong>${statusMessage}</strong>
-        </div>
-
-        <p>Hola <strong>${customerDisplayName}</strong>,</p>
-        <p>Tu pedido ha sido ${paymentMethod === 'oxxo' && !isAsyncPayment ? 'registrado' : 'confirmado'} exitosamente.</p>
-
-        <div style="background-color: #f8f9fa; border-radius: 8px; padding: 20px; margin: 20px 0;">
-            <h3 style="color: #000000; margin-top: 0;">📦 Productos de tu pedido (${totalProducts} ${totalProducts === 1 ? 'artículo' : 'artículos'})</h3>
-            ${productsList}
-        </div>
-
-        ${paymentMethod === 'oxxo' && !isAsyncPayment ? `
-            <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <strong>⚠️ Pendiente de pago OXXO</strong><br>
-                Tu pedido será procesado una vez que completes el pago en OXXO. 
-                Revisa tu email para el comprobante de pago.
-            </div>
-        ` : `
-            <div style="background-color: #d4edda; border-left: 4px solid #28a745; padding: 15px; margin: 20px 0; border-radius: 5px;">
-                <strong>✅ ¿Qué sigue?</strong><br>
-                Nuestro equipo preparará tu pedido y te notificaremos cuando esté listo para envío.
-            </div>
-        `}
-
-        <div style="text-align: center; margin: 30px 0;">
-            <p style="font-size: 18px; color: #000000; margin: 10px 0;">
-                <strong>¡Gracias por elegir EverBlack Store! 🖤</strong>
-            </p>
-            <p style="font-size: 14px; color: #666;">
-                Cualquier duda, responde a este email o contáctanos
-            </p>
-        </div>
-    `;
-
-    const emailConfig = {
-        to: email,
-        from: "noreply@everblack.store",
-        cc: "info@everblack.store",
-        bcc: "ventas@everblack.store",
-        replyTo: "info@everblack.store",
-        subject: subject,
-        html: createEmailTemplate(content, "Confirmación de Compra - EverBlack Store"),
-    };
 
     try {
-        console.log(`📧 Enviando email de confirmación...`);
+        console.log(`📧 === ENVIANDO EMAIL DE CONFIRMACIÓN ===`);
+        console.log(`📧 Cliente: ${customerName}`);
+        console.log(`📧 Email: ${email}`);
+        console.log(`📧 Productos: ${products?.length || 0}`);
+        console.log(`📧 Método de pago: ${paymentMethod}`);
+        console.log(`📧 Es asíncrono: ${isAsyncPayment}`);
+        console.log(`📧 Orden ID: ${orderId}`);
+
+        if (!email || !products || products.length === 0) {
+            console.error(`❌ Datos insuficientes para enviar email de confirmación`);
+            return false;
+        }
+
+        // Generar contenido del email
+        let productsList = '';
+        let total = 0;
+
+        products.forEach(product => {
+            const price = product.discountPrice || product.realPrice || 0;
+            const quantity = product.stockSelected || 1;
+            const itemTotal = (price * quantity) / 100; // Convertir de centavos a pesos
+
+            total += itemTotal;
+
+            let productName = product.product_name || product.name || 'Producto';
+            if (product.size && product.size.trim() !== '') {
+                const sizeName = product.size.split('-')[0];
+                productName = `${productName} - Talla: ${sizeName}`;
+            }
+
+            productsList += `
+                <tr style="border-bottom: 1px solid #eee;">
+                    <td style="padding: 15px 0; font-weight: 500;">${productName}</td>
+                    <td style="padding: 15px 0; text-align: center;">${quantity}</td>
+                    <td style="padding: 15px 0; text-align: right; font-weight: 600;">$${itemTotal.toFixed(2)} MXN</td>
+                </tr>
+            `;
+        });
+
+        // Determinar mensaje según método de pago
+        let paymentMessage = '';
+        let statusMessage = '';
+
+        if (paymentMethod === 'oxxo') {
+            paymentMessage = `
+                <div style="background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #ffb000;">
+                    <h3 style="margin: 0 0 10px 0; color: #856404;">🏪 Pago OXXO Registrado</h3>
+                    <p style="margin: 0; color: #856404;">
+                        Tu pago OXXO ha sido registrado exitosamente. Tu pedido será preparado para envío una vez que se confirme el pago.
+                    </p>
+                </div>
+            `;
+            statusMessage = 'Tu pedido está siendo preparado y será enviado pronto.';
+        } else if (isAsyncPayment) {
+            paymentMessage = `
+                <div style="background: #d1ecf1; border: 1px solid #bee5eb; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #17a2b8;">
+                    <h3 style="margin: 0 0 10px 0; color: #0c5460;">💳 Pago Confirmado</h3>
+                    <p style="margin: 0; color: #0c5460;">
+                        Tu pago ha sido acreditado exitosamente. Tu pedido está siendo preparado para envío.
+                    </p>
+                </div>
+            `;
+            statusMessage = 'Tu pago ha sido confirmado y tu pedido está siendo preparado.';
+        } else {
+            paymentMessage = `
+                <div style="background: #d4edda; border: 1px solid #c3e6cb; border-radius: 8px; padding: 20px; margin: 20px 0; border-left: 4px solid #28a745;">
+                    <h3 style="margin: 0 0 10px 0; color: #155724;">✅ Pago Completado</h3>
+                    <p style="margin: 0; color: #155724;">
+                        Tu pago ha sido procesado exitosamente. Tu pedido está siendo preparado para envío.
+                    </p>
+                </div>
+            `;
+            statusMessage = 'Tu pedido está confirmado y será enviado pronto.';
+        }
+
+        const emailContent = `
+            <h2 style="color: #333; margin: 0 0 20px 0;">¡Hola ${customerName}!</h2>
+            <p style="font-size: 16px; color: #666; margin: 0 0 20px 0;">
+                Gracias por tu compra en <strong>EverBlack Store</strong>. ${statusMessage}
+            </p>
+            
+            ${paymentMessage}
+            
+            <h3 style="color: #333; margin: 30px 0 15px 0; padding: 10px 0; border-bottom: 2px solid #f0f0f0;">
+                📦 Resumen de tu pedido
+            </h3>
+            
+            <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+                <thead>
+                    <tr style="background-color: #f8f9fa;">
+                        <th style="padding: 15px 0; text-align: left; font-weight: 600; color: #333;">Producto</th>
+                        <th style="padding: 15px 0; text-align: center; font-weight: 600; color: #333;">Cantidad</th>
+                        <th style="padding: 15px 0; text-align: right; font-weight: 600; color: #333;">Precio</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${productsList}
+                    <tr style="border-top: 2px solid #333; background-color: #f8f9fa;">
+                        <td colspan="2" style="padding: 20px 0; font-weight: 700; font-size: 18px; color: #333;">TOTAL</td>
+                        <td style="padding: 20px 0; text-align: right; font-weight: 700; font-size: 18px; color: #333;">$${total.toFixed(2)} MXN</td>
+                    </tr>
+                </tbody>
+            </table>
+            
+            <div style="background: #f8f9fa; border-radius: 8px; padding: 25px; margin: 30px 0; text-align: center;">
+                <h3 style="margin: 0 0 15px 0; color: #333;">📞 ¿Necesitas ayuda?</h3>
+                <p style="margin: 0; color: #666; line-height: 1.6;">
+                    Si tienes preguntas sobre tu pedido, no dudes en contactarnos:<br>
+                    📧 <a href="mailto:info@everblack.store" style="color: #000; text-decoration: none; font-weight: 600;">info@everblack.store</a>
+                </p>
+            </div>
+            
+            <p style="margin: 30px 0 0 0; font-size: 16px; color: #333; text-align: center;">
+                ¡Gracias por elegir <strong>EverBlack</strong>! 🖤
+            </p>
+        `;
+
+        const finalEmailContent = createEmailTemplate(emailContent, subject);
+
+        const emailConfig = {
+            to: email,
+            from: "noreply@everblack.store",
+            subject: subject,
+            html: finalEmailContent
+        };
+
         const success = await sendEmailWithRetry(emailConfig, 3, 2000);
 
         if (success) {
-            console.log(`✅ Email de confirmación enviado exitosamente a: ${email} (método: ${paymentMethod})`);
+            console.log(`✅ Email de confirmación enviado exitosamente a: ${email}`);
         } else {
             console.error(`❌ No se pudo enviar email de confirmación a: ${email}`);
         }
 
-        // Limpiar el control de duplicados al completar
-        finishEmailProcessing(orderIdToUse, paymentIntentIdToUse);
-
         return success;
+
     } catch (error) {
-        console.error(`❌ Error enviando email de confirmación a ${email}:`, error);
-
-        // Limpiar el control de duplicados en caso de error
-        finishEmailProcessing(orderIdToUse, paymentIntentIdToUse);
-
+        console.error(`❌ Error enviando email de confirmación:`, error);
         return false;
+    } finally {
+        // Finalizar control de duplicados
+        if (orderId && paymentIntentId) {
+            finishEmailProcessing(orderId, paymentIntentId);
+        }
     }
 }
 
@@ -1934,55 +2345,36 @@ async function sendOrderConfirmationEmail(customerName, email, strapi, products,
  * Función de prueba de emails (solo para desarrollo)
  */
 async function testEmail(ctx) {
-    console.log(`🧪 === INICIANDO PRUEBA DE EMAIL ===`);
-
-    const testEmailConfig = {
-        to: "pspkuroro@gmail.com", // Email de prueba
-        from: "noreply@everblack.store",
-        subject: "🧪 Prueba de Email - EverBlack Store",
-        html: createEmailTemplate(`
-            <h2>Prueba de Sistema de Emails</h2>
-            <p>Este es un email de prueba para verificar que el sistema funciona correctamente.</p>
-            <div style="background-color: #d4edda; border: 1px solid #c3e6cb; border-radius: 5px; padding: 15px; margin: 20px 0;">
-                <strong>✅ Sistema funcionando correctamente</strong>
-            </div>
-            <p>Información del sistema:</p>
-            <ul>
-                <li>Fecha: ${new Date().toISOString()}</li>
-                <li>Servidor: ${process.env.NODE_ENV || 'development'}</li>
-                <li>Plugin de email: Disponible</li>
-            </ul>
-        `, "Prueba de Email - EverBlack Store")
-    };
+    console.log("🧪 === INICIANDO TEST DE EMAIL ===");
 
     try {
-        console.log(`🧪 Configuración del entorno:`);
-        console.log(`   - RESEND_API_KEY: ${process.env.RESEND_API_KEY ? 'Configurado' : 'NO CONFIGURADO'}`);
-        console.log(`   - PUBLIC_URL: ${process.env.PUBLIC_URL || 'NO CONFIGURADO'}`);
-        console.log(`   - Plugin email: ${!!(strapi.plugins['email'] && strapi.plugins['email'].services && strapi.plugins['email'].services.email)}`);
+        const testEmailConfig = {
+            to: "test@example.com",
+            from: "noreply@everblack.store",
+            subject: "🧪 Test Email - EverBlack Store",
+            html: createEmailTemplate(
+                `
+                <h2>¡Email de prueba!</h2>
+                <p>Este es un email de prueba para verificar la configuración.</p>
+                <p>Timestamp: ${new Date().toISOString()}</p>
+                `,
+                "Test Email"
+            )
+        };
 
-        const success = await sendEmailWithRetry(testEmailConfig, 3, 1000);
+        const success = await sendEmailWithRetry(testEmailConfig, 1, 1000);
 
-        if (success) {
-            ctx.body = {
-                success: true,
-                message: "Email de prueba enviado correctamente",
-                timestamp: new Date().toISOString()
-            };
-        } else {
-            ctx.response.status = 500;
-            ctx.body = {
-                success: false,
-                message: "No se pudo enviar el email de prueba",
-                timestamp: new Date().toISOString()
-            };
-        }
+        console.log(`🧪 Resultado del test: ${success ? 'ÉXITO' : 'FALLO'}`);
+
+        return {
+            success,
+            message: success ? "Email de prueba enviado exitosamente" : "Falló el envío del email de prueba",
+            timestamp: new Date().toISOString()
+        };
     } catch (error) {
-        console.error(`🧪 Error en prueba de email:`, error);
-        ctx.response.status = 500;
-        ctx.body = {
+        console.error("🧪 Error en test de email:", error);
+        return {
             success: false,
-            message: "Error crítico en prueba de email",
             error: error.message,
             timestamp: new Date().toISOString()
         };
@@ -1993,54 +2385,36 @@ async function testEmail(ctx) {
  * Función de prueba para el sistema de control de emails duplicados
  */
 async function testEmailConcurrencyControl(ctx) {
-    console.log(`🧪 === INICIANDO PRUEBA DE CONTROL DE CONCURRENCIA ===`);
+    console.log("🧪 === TEST DE CONTROL DE CONCURRENCIA ===");
 
-    const testOrderId = 'test-order-123';
-    const testPaymentId = 'pi_test_payment_123';
+    const testOrderId = "test-order-123";
+    const testPaymentIntentId = "test-pi-456";
 
-    try {
-        // Primer intento - debería permitir
-        const first = startEmailProcessing(testOrderId, testPaymentId);
-        console.log(`🧪 Primer intento: ${first ? 'PERMITIDO' : 'BLOQUEADO'}`);
+    // Simular múltiples intentos simultáneos
+    const promises = [];
+    for (let i = 0; i < 5; i++) {
+        promises.push(new Promise(async (resolve) => {
+            const canProceed = startEmailProcessing(testOrderId, testPaymentIntentId);
+            console.log(`🧪 Intento ${i + 1}: ${canProceed ? 'PERMITIDO' : 'BLOQUEADO'}`);
 
-        // Segundo intento - debería bloquear
-        const second = startEmailProcessing(testOrderId, testPaymentId);
-        console.log(`🧪 Segundo intento: ${second ? 'PERMITIDO' : 'BLOQUEADO'}`);
+            if (canProceed) {
+                // Simular procesamiento
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                finishEmailProcessing(testOrderId, testPaymentIntentId);
+            }
 
-        // Limpiar el primer procesamiento
-        finishEmailProcessing(testOrderId, testPaymentId);
-        console.log(`🧪 Procesamiento finalizado`);
-
-        // Tercer intento - debería permitir de nuevo
-        const third = startEmailProcessing(testOrderId, testPaymentId);
-        console.log(`🧪 Tercer intento después de limpiar: ${third ? 'PERMITIDO' : 'BLOQUEADO'}`);
-
-        // Limpiar
-        finishEmailProcessing(testOrderId, testPaymentId);
-
-        ctx.body = {
-            success: true,
-            message: "Prueba de control de concurrencia completada",
-            results: {
-                first_attempt: first,
-                second_attempt: second,
-                third_attempt: third
-            },
-            expected: {
-                first_attempt: true,
-                second_attempt: false,
-                third_attempt: true
-            },
-            status: first && !second && third ? "PASSED ✅" : "FAILED ❌"
-        };
-
-    } catch (error) {
-        console.error(`🧪 Error en prueba de concurrencia:`, error);
-        ctx.response.status = 500;
-        ctx.body = {
-            success: false,
-            message: "Error en prueba de concurrencia",
-            error: error.message
-        };
+            resolve({ attempt: i + 1, allowed: canProceed });
+        }));
     }
+
+    const results = await Promise.all(promises);
+    const allowedCount = results.filter(r => r.allowed).length;
+
+    console.log(`🧪 Resultado: ${allowedCount} de 5 intentos fueron permitidos`);
+
+    return {
+        success: allowedCount === 1,
+        results,
+        message: allowedCount === 1 ? "Control de concurrencia funciona correctamente" : "Problema con el control de concurrencia"
+    };
 }

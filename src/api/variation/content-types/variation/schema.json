@@ -47,6 +47,32 @@
     "sku": {
       "type": "uid",
       "required": false
+    },
+    "color_hex": {
+      "type": "string"
+    },
+    "material": {
+      "type": "string"
+    },
+    "weight": {
+      "type": "decimal"
+    },
+    "dimensions": {
+      "type": "json"
+    },
+    "barcode": {
+      "type": "string"
+    },
+    "supplier_code": {
+      "type": "string"
+    },
+    "restock_alert_level": {
+      "type": "integer",
+      "default": 10
+    },
+    "is_default": {
+      "type": "boolean",
+      "default": false
     }
   }
 }

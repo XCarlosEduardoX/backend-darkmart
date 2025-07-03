@@ -92,6 +92,18 @@
     },
     "customer_email": {
       "type": "string"
+    },
+    "shipping_cost": {
+      "type": "decimal",
+      "default": 0
+    },
+    "subtotal": {
+      "type": "decimal",
+      "default": 0
+    },
+    "coupon_discount": {
+      "type": "decimal",
+      "default": 0
     }
   }
 }

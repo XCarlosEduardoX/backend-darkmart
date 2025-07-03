@@ -19,6 +19,11 @@ module.exports = ({ env }) => ({
         cloud_name: env('CLOUDINARY_NAME'),
         api_key: env('CLOUDINARY_KEY'),
         api_secret: env('CLOUDINARY_SECRET'),
+        default_transformations: [
+          [
+            { fetch_format: 'webp', quality: 'auto' }
+          ]
+        ]
       },
       actionOptions: {
         upload: {},
@@ -37,12 +42,39 @@ module.exports = ({ env }) => ({
       applicationId: env('ALGOLIA_APP_ID'),
       contentTypes: [
         {
-          name: 'api::product.product', // Nombre del modelo en Strap
-          index: 'dev_products', // Nombre del índice en Algolia
-          fields: ['product_name', 'description', 'price'], // Campos que quieres sincronizar
+          name: 'api::product.product',
+          index: 'dev_products',
+          // Campos relevantes para búsqueda y filtrado
+          fields: [
+            'product_name',
+            'slug',
+            'description',
+            'seo_descripcion',
+            'price',
+            'discount',
+            'stock',
+            'is_featured',
+            'active',
+            'category',
+            'tags',
+            'gender',
+            'origin',
+            'average_rating',
+            'total_reviews',
+            'sustainability_score',
+            'eco_friendly',
+            'condition',
+            'color',
+            'model',
+            'images',
+            'recommended_products',
+            'frequently_bought_together'
+          ],
+          // Puedes agregar opciones avanzadas aquí si el plugin lo permite
         },
-
       ],
+      // Puedes agregar settings avanzados de Algolia aquí si el plugin lo soporta
+      // Por ejemplo: searchableAttributes, customRanking, attributesForFaceting
     },
   },
   'users-permissions': {

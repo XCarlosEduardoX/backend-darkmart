@@ -1,0 +1,79 @@
+{
+  "kind": "collectionType",
+  "collectionName": "product_analytics",
+  "info": {
+    "singularName": "product-analytic",
+    "pluralName": "product-analytics",
+    "displayName": "Product Analytics",
+    "description": "Analytics y métricas de productos"
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "product": {
+      "type": "relation",
+      "relation": "oneToOne",
+      "target": "api::product.product"
+    },
+    "views_today": {
+      "type": "integer",
+      "default": 0
+    },
+    "views_week": {
+      "type": "integer",
+      "default": 0
+    },
+    "views_month": {
+      "type": "integer",
+      "default": 0
+    },
+    "cart_adds_today": {
+      "type": "integer",
+      "default": 0
+    },
+    "cart_adds_week": {
+      "type": "integer",
+      "default": 0
+    },
+    "cart_adds_month": {
+      "type": "integer",
+      "default": 0
+    },
+    "purchases_today": {
+      "type": "integer",
+      "default": 0
+    },
+    "purchases_week": {
+      "type": "integer",
+      "default": 0
+    },
+    "purchases_month": {
+      "type": "integer",
+      "default": 0
+    },
+    "conversion_rate": {
+      "type": "decimal",
+      "default": 0
+    },
+    "avg_time_on_page": {
+      "type": "integer",
+      "default": 0
+    },
+    "bounce_rate": {
+      "type": "decimal",
+      "default": 0
+    },
+    "last_updated": {
+      "type": "datetime"
+    },
+    "trending_score": {
+      "type": "decimal",
+      "default": 0
+    },
+    "search_keywords": {
+      "type": "json"
+    }
+  }
+}

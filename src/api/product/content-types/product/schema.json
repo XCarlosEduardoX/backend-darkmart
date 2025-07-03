@@ -18,12 +18,12 @@
   "attributes": {
     "product_name": {
       "type": "string",
-      "required": true,
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "required": true
     },
     "slug": {
       "type": "uid",
@@ -32,31 +32,31 @@
     },
     "active": {
       "type": "boolean",
-      "default": false,
-      "required": false,
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "required": false,
+      "default": false
     },
     "is_featured": {
       "type": "boolean",
-      "default": false,
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "default": false
     },
     "price": {
       "type": "decimal",
-      "required": false,
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "required": false
     },
     "stock": {
       "type": "integer",
@@ -68,12 +68,12 @@
     },
     "discount": {
       "type": "decimal",
-      "default": 0,
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "default": 0
     },
     "category": {
       "type": "relation",
@@ -88,71 +88,238 @@
     },
     "origin": {
       "type": "enumeration",
-      "enum": [
-        "México",
-        "China",
-        "EUA"
-      ],
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
-      }
+      },
+      "enum": [
+        "México",
+        "China",
+        "EUA"
+      ]
     },
     "images": {
       "type": "media",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
       "multiple": true,
       "required": false,
       "allowedTypes": [
         "images",
         "files"
-      ],
+      ]
+    },
+    "units_sold": {
+      "type": "integer",
+      "private": true,
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "required": true,
+      "default": 0
+    },
+    "sku": {
+      "type": "uid",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "required": false
+    },
+    "seo_descripcion": {
+      "type": "text",
       "pluginOptions": {
         "i18n": {
           "localized": true
         }
       }
     },
-    "units_sold": {
-      "pluginOptions": {
-        "i18n": {
-          "localized": true
-        }
-      },
-      "type": "integer",
-      "required": true,
-      "default": 0,
-      "private": true
-    },
-    "sku": {
-      "pluginOptions": {
-        "i18n": {
-          "localized": true
-        }
-      },
-      "type": "uid",
-      "required": false
-    },
-    "seo_descripcion": {
-      "pluginOptions": {
-        "i18n": {
-          "localized": true
-        }
-      },
-      "type": "text"
-    },
     "gender": {
       "type": "enumeration",
+      "required": true,
+      "default": "Hombre",
       "enum": [
         "Hombre",
         "Mujer",
         "Mixto"
-      ],
-      "default": "Hombre",
-      "required": true
+      ]
     },
     "description": {
       "type": "richtext"
+    },
+    "model": {
+      "type": "string",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "color": {
+      "type": "string",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "average_rating": {
+      "type": "decimal",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": 0,
+      "min": 0,
+      "max": 5
+    },
+    "total_reviews": {
+      "type": "integer",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": 0
+    },
+    "sustainability_score": {
+      "type": "integer",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": 5,
+      "min": 1,
+      "max": 10
+    },
+    "eco_friendly": {
+      "type": "boolean",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": false
+    },
+    "estimated_delivery_days": {
+      "type": "integer",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": 7
+    },
+    "warranty_months": {
+      "type": "integer",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": 12
+    },
+    "video_url": {
+      "type": "string",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "tags": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::tag.tag",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "recommended_products": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::product.product",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "frequently_bought_together": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::product.product",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "view_count": {
+      "type": "integer",
+      "private": true,
+      "default": 0
+    },
+    "condition": {
+      "type": "enumeration",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "default": "Nuevo",
+      "enum": [
+        "Nuevo",
+        "Como nuevo",
+        "Usado - Excelente",
+        "Usado - Bueno",
+        "Reacondicionado"
+      ]
+    },
+    "size_guide": {
+      "type": "media",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      },
+      "allowedTypes": [
+        "images"
+      ]
+    },
+    "profit_margin": {
+      "type": "decimal",
+      "private": true,
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
+    },
+    "reviews": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::review.review",
+      "mappedBy": "product"
+    },
+    "short_description": {
+      "type": "richtext",
+      "pluginOptions": {
+        "i18n": {
+          "localized": true
+        }
+      }
     }
   }
 }

@@ -11,6 +11,7 @@
   "options": {
     "draftAndPublish": false
   },
+  "pluginOptions": {},
   "attributes": {
     "username": {
       "type": "string",
@@ -79,14 +80,14 @@
     },
     "accept_terms": {
       "type": "boolean",
-      "default": true,
-      "required": true
+      "required": true,
+      "default": true
     },
     "promo_first_purchase_used": {
       "type": "boolean",
-      "default": false,
+      "private": true,
       "required": true,
-      "private": true
+      "default": false
     },
     "wishlists": {
       "type": "relation",
@@ -97,6 +98,12 @@
     "wishlist_identifier": {
       "type": "uid",
       "targetField": "username"
+    },
+    "reviews": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::review.review",
+      "mappedBy": "users_permissions_user"
     }
   }
 }

@@ -26,9 +26,28 @@ let metrics = {
     lastReset: new Date()
 };
 
+// Función para validar claves de cache
+const isValidCacheKey = (key) => {
+    if (!key || typeof key !== 'string') {
+        return false;
+    }
+    // Verificar que no contenga 'undefined', 'null' o sea vacío
+    if (key.includes('undefined') || key.includes('null') || key.trim() === '') {
+        return false;
+    }
+    return true;
+};
+
 // Funciones de caché optimizadas
 const cache = {
     async get(key) {
+        // Validar clave antes de usar
+        if (!isValidCacheKey(key)) {
+            console.warn(`🚫 Clave de cache inválida detectada: "${key}"`);
+            metrics.errors++;
+            return null;
+        }
+
         try {
             const startTime = Date.now();
             const data = await redis.get(key);
@@ -37,9 +56,9 @@ const cache = {
                 metrics.hits++;
                 const parsedData = JSON.parse(data);
 
-                // Log de rendimiento
+                // Log de rendimiento solo si es muy lento
                 const duration = Date.now() - startTime;
-                if (duration > 50) { // Más de 50ms
+                if (duration > 100) { // Aumentado a 100ms para reducir spam
                     console.warn(`⚠️ Cache get lento: ${key} (${duration}ms)`);
                 }
 
@@ -50,12 +69,25 @@ const cache = {
             }
         } catch (error) {
             metrics.errors++;
-            console.error(`Error getting key ${key} from Redis:`, error);
+            console.error(`❌ Error getting key ${key} from Redis:`, error);
             return null;
         }
     },
 
     async set(key, value, maxAge = 3600) {
+        // Validar clave antes de usar
+        if (!isValidCacheKey(key)) {
+            console.warn(`🚫 Intento de set con clave inválida: "${key}"`);
+            metrics.errors++;
+            return;
+        }
+
+        // Validar valor
+        if (value === undefined || value === null) {
+            console.warn(`🚫 Intento de cachear valor nulo para clave: ${key}`);
+            return;
+        }
+
         try {
             const startTime = Date.now();
             const serializedValue = JSON.stringify(value);
@@ -63,20 +95,33 @@ const cache = {
             await redis.set(key, serializedValue, 'EX', maxAge);
             metrics.writes++;
 
-            // Log de rendimiento
+            // Log de rendimiento solo si es muy lento
             const duration = Date.now() - startTime;
-            if (duration > 100) { // Más de 100ms
+            if (duration > 150) { // Aumentado a 150ms para reducir spam
                 console.warn(`⚠️ Cache set lento: ${key} (${duration}ms)`);
             }
 
         } catch (error) {
             metrics.errors++;
-            console.error(`Error setting key ${key} in Redis:`, error);
+            console.error(`❌ Error setting key ${key} in Redis:`, error);
         }
     },
 
     // Nuevo método con estrategia inteligente
     async setWithStrategy(key, value, options = {}) {
+        // Validar clave antes de usar
+        if (!isValidCacheKey(key)) {
+            console.warn(`🚫 Intento de setWithStrategy con clave inválida: "${key}"`);
+            metrics.errors++;
+            return;
+        }
+
+        // Validar valor
+        if (value === undefined || value === null) {
+            console.warn(`🚫 Intento de cachear valor nulo con estrategia para clave: ${key}`);
+            return;
+        }
+
         const {
             ttl = 3600,
             priority = 'normal',
@@ -89,7 +134,6 @@ const cache = {
 
             // Compresión para valores grandes (opcional)
             if (compress && serializedValue.length > 10000) {
-                // En el futuro se puede añadir compresión aquí
                 console.log(`📦 Valor grande detectado: ${key} (${serializedValue.length} chars)`);
             }
 
@@ -107,31 +151,44 @@ const cache = {
                     break;
             }
 
-            await redis.set(key, serializedValue, 'EX', adjustedTTL);
+            // Usar pipeline para operaciones múltiples
+            const pipeline = redis.pipeline();
+            pipeline.set(key, serializedValue, 'EX', adjustedTTL);
 
             // Indexar por tags si se proporcionan
             if (tags.length > 0) {
                 for (const tag of tags) {
-                    await redis.sadd(`tag:${tag}`, key);
-                    await redis.expire(`tag:${tag}`, adjustedTTL);
+                    pipeline.sadd(`tag:${tag}`, key);
+                    pipeline.expire(`tag:${tag}`, adjustedTTL);
                 }
             }
 
+            await pipeline.exec();
             metrics.writes++;
-            console.log(`💾 Cache set con estrategia ${priority}: ${key} (TTL: ${adjustedTTL}s)`);
+
+            // Log menos verboso, solo para operaciones críticas
+            if (priority === 'critical' || priority === 'high') {
+                console.log(`💾 Cache ${priority}: ${key} (TTL: ${adjustedTTL}s)`);
+            }
 
         } catch (error) {
             metrics.errors++;
-            console.error(`Error setting key ${key} with strategy:`, error);
+            console.error(`❌ Error setting key ${key} with strategy:`, error);
         }
     },
 
     async del(key) {
+        // Validar clave antes de usar
+        if (!isValidCacheKey(key)) {
+            console.warn(`🚫 Intento de delete con clave inválida: "${key}"`);
+            return;
+        }
+
         try {
             await redis.del(key);
         } catch (error) {
             metrics.errors++;
-            console.error(`Error deleting key ${key} from Redis:`, error);
+            console.error(`❌ Error deleting key ${key} from Redis:`, error);
         }
     },
 
@@ -242,11 +299,17 @@ const cache = {
 
     // Método para verificar si existe una clave
     async exists(key) {
+        // Validar clave antes de usar
+        if (!isValidCacheKey(key)) {
+            console.warn(`🚫 Intento de exists con clave inválida: "${key}"`);
+            return false;
+        }
+
         try {
             return await redis.exists(key) === 1;
         } catch (error) {
             metrics.errors++;
-            console.error(`Error checking existence of key ${key}:`, error);
+            console.error(`❌ Error checking existence of key ${key}:`, error);
             return false;
         }
     },
@@ -299,15 +362,100 @@ const cache = {
                 error: error.message
             };
         }
+    },
+
+    // Nuevo método para limpiar claves inválidas
+    async cleanInvalidKeys() {
+        try {
+            console.log('🧹 Iniciando limpieza de claves inválidas...');
+            const pattern = '*undefined*';
+            const keys = await redis.keys(pattern);
+            
+            if (keys.length > 0) {
+                await redis.del(keys);
+                console.log(`🗑️ Eliminadas ${keys.length} claves con 'undefined'`);
+            }
+
+            // También limpiar claves con 'null'
+            const nullPattern = '*null*';
+            const nullKeys = await redis.keys(nullPattern);
+            
+            if (nullKeys.length > 0) {
+                await redis.del(nullKeys);
+                console.log(`🗑️ Eliminadas ${nullKeys.length} claves con 'null'`);
+            }
+
+            return keys.length + nullKeys.length;
+        } catch (error) {
+            console.error('❌ Error limpiando claves inválidas:', error);
+            return 0;
+        }
+    },
+
+    // Método para obtener estadísticas detalladas
+    async getDetailedStats() {
+        try {
+            const info = await redis.info();
+            const keyspace = await redis.info('keyspace');
+            const memory = await redis.info('memory');
+            
+            return {
+                metrics: this.getMetrics(),
+                keyspace,
+                memory: memory.match(/used_memory_human:(.+)/)?.[1]?.trim(),
+                connected_clients: info.match(/connected_clients:(\d+)/)?.[1],
+                total_commands_processed: info.match(/total_commands_processed:(\d+)/)?.[1]
+            };
+        } catch (error) {
+            console.error('❌ Error obteniendo estadísticas detalladas:', error);
+            return null;
+        }
     }
 };
 
-// Reporte automático de métricas cada hora
+// Función utilitaria exportada para validar IDs
+const validateId = (id) => {
+    if (!id || id === 'undefined' || id === 'null' || id === undefined || id === null) {
+        return null;
+    }
+    
+    // Convertir a string y limpiar
+    const cleanId = String(id).trim();
+    
+    if (cleanId === '' || cleanId === 'undefined' || cleanId === 'null') {
+        return null;
+    }
+    
+    return cleanId;
+};
+
+// Limpieza automática de claves inválidas cada 6 horas
+setInterval(async () => {
+    try {
+        const cleaned = await cache.cleanInvalidKeys();
+        if (cleaned > 0) {
+            console.log(`🧹 Limpieza automática: ${cleaned} claves inválidas eliminadas`);
+        }
+    } catch (error) {
+        console.error('❌ Error en limpieza automática:', error);
+    }
+}, 6 * 60 * 60 * 1000); // 6 horas
+
+// Reporte automático de métricas cada hora (reducido verbosidad)
 setInterval(() => {
     const metricsReport = cache.getMetrics();
-    console.log('📈 Redis Cache Metrics:', metricsReport);
+    // Solo reportar si hay actividad significativa
+    if (metricsReport.totalRequests > 10) {
+        console.log('📈 Redis Cache Metrics:', {
+            hitRate: metricsReport.hitRate,
+            totalRequests: metricsReport.totalRequests,
+            errors: metricsReport.errors
+        });
+    }
 }, 3600000); // 1 hora
 
 
-// Exportar el objeto de caché mejorado
+// Exportar el objeto de caché mejorado y funciones utilitarias
 module.exports = cache;
+module.exports.validateId = validateId;
+module.exports.isValidCacheKey = isValidCacheKey;
